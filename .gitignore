@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+.venv/
+venv/
+tmp/
+
+# Sensitive configuration
+config.yaml

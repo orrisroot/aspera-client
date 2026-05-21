@@ -1,0 +1,21 @@
+# Aspera Node API Configuration
+# Copy this file to config.yaml and fill in your settings.
+
+# Aspera Node server settings
+host: "node.example.com"
+port: 9092
+user: "node_user"
+password: "your_password"
+
+# SSL verification (set to false for self-signed certificates)
+verify_ssl: false
+
+# URL path prefix (e.g., "/node_api" for servers behind a proxy)
+# Leave empty for direct access (e.g., https://host:9092/)
+path_prefix: ""
+
+# Request timeout in seconds (default: 30)
+timeout: 30
+
+# Optional: Aspera SSH identity key path
+# identity_file: "/path/to/aspera_id_dsa.openssh"
