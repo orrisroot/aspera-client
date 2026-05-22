@@ -12,7 +12,7 @@ A CLI tool for IBM Aspera Node API. Supports file listing, searching, and high-s
 2. `~/.aspera/connect/bin/ascp` (default install location)
 3. System `PATH`
 
-**Setup command:** Run `aspera setup` to install the Aspera Connect SDK and generate required authentication keys (bypass key for token auth, fallback key for HTTP fallback). Keys are stored in `~/.aspera/connect/` and automatically applied to download commands.
+**Setup command:** Run `aspera setup` to install the Aspera Connect SDK and generate required authentication keys (bypass key for token auth, fallback key for HTTP fallback). Keys are stored in `~/.aspera/connect/` and automatically applied to download commands. The bypass key is bundled as a DER file in `aspera_client/data/bypass_rsa.der`.
 
 ## Installation
 

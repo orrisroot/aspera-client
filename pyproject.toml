@@ -27,3 +27,6 @@ aspera = "aspera_client.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["aspera_client*"]
+
+[tool.setuptools.package-data]
+aspera_client = ["data/bypass_rsa.der"]
