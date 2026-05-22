@@ -15,17 +15,20 @@ from .cli import load_config, resolve_host_port
 from .formatter import format_download_result
 from .node_api import AsperaAuthError, AsperaApiError, AsperaNodeClient
 from .transfer import (
-    ASPERA_ASCP,
     DIRECTION_RECEIVE,
     _build_ascp_command,
     _execute_ascp,
     build_file_list,
     build_transfer_spec_gen3,
     build_transfer_spec_gen4,
+    download_with_progress,
     extract_spec,
     find_common_root,
     fix_resume_policy,
-    download_with_progress,
+    get_ascp_path,
+    get_bypass_key_path,
+    get_fallback_cert_path,
+    get_fallback_key_path,
 )
 
 
@@ -57,10 +60,17 @@ def cmd_download(args: argparse.Namespace) -> int:
     multi_session = args.multi_session
     use_gen4 = args.gen4
     file_id = getattr(args, "file_id", None)
+    max_retries = getattr(args, "retries", 3)
+    transfer_timeout = getattr(args, "timeout", None)
+    ascp_path_override = getattr(args, "ascp_path", None)
+
+    if ascp_path_override:
+        os.environ["ASPERA_ASCP"] = ascp_path_override
 
     # Check ascp availability
-    if not os.path.exists(ASPERA_ASCP):
-        print(f"Error: Aspera ascp not found at {ASPERA_ASCP}", file=sys.stderr)
+    ascp_path = get_ascp_path()
+    if not os.path.exists(ascp_path):
+        print(f"Error: Aspera ascp not found at {ascp_path}", file=sys.stderr)
         print("Please install Aspera Connect SDK:", file=sys.stderr)
         print("  https://www.ibm.com/products/aspera-connect", file=sys.stderr)
         return 1
@@ -126,6 +136,8 @@ def cmd_download(args: argparse.Namespace) -> int:
                         resume=resume,
                         multi_session=multi_session,
                         quiet=quiet,
+                        max_retries=max_retries,
+                        transfer_timeout=transfer_timeout,
                     )
                     elapsed = time.time() - total_start
                     status = "success" if return_code == 0 else "failed"
@@ -157,6 +169,7 @@ def cmd_download(args: argparse.Namespace) -> int:
                         local_dest=local_dest,
                         resume=resume,
                         multi_session=multi_session,
+                        max_retries=max_retries,
                     )
                 else:
                     spec = extract_spec(token_data)
@@ -167,6 +180,12 @@ def cmd_download(args: argparse.Namespace) -> int:
                         multi_session=multi_session,
                         quiet=quiet,
                         ssh_private_key=spec.get("ssh_private_key"),
+                        bypass_key=get_bypass_key_path(),
+                        http_fallback=True,
+                        fallback_key=get_fallback_key_path(),
+                        fallback_cert=get_fallback_cert_path(),
+                        max_retries=max_retries,
+                        transfer_timeout=transfer_timeout,
                     )
                 elapsed = time.time() - start_time
 
@@ -236,6 +255,8 @@ def _download_gen4(
     resume: bool = False,
     multi_session: int = 1,
     quiet: bool = False,
+    max_retries: int = 3,
+    transfer_timeout: int | None = None,
 ) -> int:
     """Execute gen4 download transfer.
 
@@ -310,6 +331,8 @@ def _download_gen4(
         multi_session=multi_session,
         quiet=quiet,
         resume=resume,
+        max_retries=max_retries,
+        transfer_timeout=transfer_timeout,
     )
 
 
@@ -319,6 +342,8 @@ def _execute_transfer_spec(
     multi_session: int = 1,
     quiet: bool = False,
     resume: bool = False,
+    max_retries: int = 3,
+    transfer_timeout: int | None = None,
 ) -> int:
     """Execute ascp from a transfer spec dict.
 
@@ -363,6 +388,10 @@ def _execute_transfer_spec(
         ssh_private_key=ssh_private_key,
         resume=resume,
         resume_policy=resume_policy,
+        bypass_key=get_bypass_key_path(),
+        http_fallback=True,
+        fallback_key=get_fallback_key_path(),
+        fallback_cert=get_fallback_cert_path(),
     )
 
     os.makedirs(local_dest, exist_ok=True)
@@ -372,6 +401,8 @@ def _execute_transfer_spec(
         env=env,
         file_list_path=file_list_path,
         quiet=quiet,
+        max_retries=max_retries,
+        transfer_timeout=transfer_timeout,
     )
 
 
@@ -380,6 +411,7 @@ def _download_with_output_redirect(
     local_dest: str,
     resume: bool = False,
     multi_session: int = 1,
+    max_retries: int = 3,
 ) -> int:
     """Execute download, redirecting stdout/stderr to stderr for clean JSON stdout."""
 
@@ -415,6 +447,10 @@ def _download_with_output_redirect(
         ssh_private_key=spec.get("ssh_private_key"),
         multi_session=multi_session,
         quiet=True,
+        bypass_key=get_bypass_key_path(),
+        http_fallback=True,
+        fallback_key=get_fallback_key_path(),
+        fallback_cert=get_fallback_cert_path(),
     )
 
     os.makedirs(local_dest, exist_ok=True)
@@ -425,4 +461,5 @@ def _download_with_output_redirect(
         file_list_path=file_list_path,
         quiet=True,
         redirect_stdout=True,
+        max_retries=max_retries,
     )

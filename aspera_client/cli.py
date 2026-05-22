@@ -43,6 +43,28 @@ def resolve_host_port(args: argparse.Namespace, config: dict) -> tuple[str, int]
     return host, int(port)
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Handle the 'setup' subcommand.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code.
+    """
+    from .setup import setup_complete
+
+    results = setup_complete(
+        install_sdk_flag=not args.no_sdk,
+        bypass_key_flag=not args.no_bypass_key,
+        fallback_key_flag=not args.no_fallback_key,
+        version=getattr(args, "version", None),
+    )
+
+    has_errors = any(k.endswith("_error") for k in results)
+    return 1 if has_errors else 0
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
@@ -214,6 +236,44 @@ def main() -> None:
         "--file-id",
         help="Gen4 file ID for transfer",
     )
+    download_parser.add_argument(
+        "--retries",
+        type=int,
+        default=3,
+        help="Max retry attempts on transient failure (default: 3)",
+    )
+    download_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="Transfer timeout in seconds (default: no timeout)",
+    )
+    download_parser.add_argument(
+        "--ascp-path",
+        help="Path to ascp binary (overrides auto-detection)",
+    )
+
+    # setup subcommand
+    setup_parser = subparsers.add_parser("setup", help="Install SDK and generate keys")
+    setup_parser.add_argument(
+        "--no-sdk",
+        action="store_true",
+        help="Skip SDK installation",
+    )
+    setup_parser.add_argument(
+        "--no-bypass-key",
+        action="store_true",
+        help="Skip bypass key generation",
+    )
+    setup_parser.add_argument(
+        "--no-fallback-key",
+        action="store_true",
+        help="Skip fallback key generation",
+    )
+    setup_parser.add_argument(
+        "--version",
+        help="Specific SDK version to install",
+    )
 
     args = parser.parse_args()
 
@@ -233,6 +293,8 @@ def main() -> None:
     elif args.command == "download":
         from .download import cmd_download
         exit_code = cmd_download(args)
+    elif args.command == "setup":
+        exit_code = cmd_setup(args)
     else:
         parser.print_help()
         exit_code = 1

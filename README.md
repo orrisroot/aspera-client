@@ -5,8 +5,14 @@ A CLI tool for IBM Aspera Node API. Supports file listing, searching, and high-s
 ## Requirements
 
 - Python 3.11+
-- [Aspera Connect SDK](https://www.ibm.com/products/aspera-connect) (installed at `~/.aspera/connect/bin/ascp`)
-- `cryptography` (for dynamic key authentication)
+- `cryptography` (for key generation and dynamic key authentication)
+
+**Ascp path resolution** (priority order):
+1. `ASPERA_ASCP` environment variable
+2. `~/.aspera/connect/bin/ascp` (default install location)
+3. System `PATH`
+
+**Setup command:** Run `aspera setup` to install the Aspera Connect SDK and generate required authentication keys (bypass key for token auth, fallback key for HTTP fallback). Keys are stored in `~/.aspera/connect/` and automatically applied to download commands.
 
 ## Installation
 
@@ -19,6 +25,31 @@ Or:
 ```bash
 pip install requests pyyaml cryptography
 ```
+
+## Setup
+
+Run the setup command to install the Aspera Connect SDK and generate authentication keys:
+
+```bash
+aspera setup
+```
+
+Options:
+- `--no-sdk`: Skip SDK installation (use existing SDK)
+- `--no-bypass-key`: Skip bypass key generation
+- `--no-fallback-key`: Skip fallback key generation
+- `--version VERSION`: Install a specific SDK version
+
+The setup command creates:
+- `~/.aspera/connect/client/aspera_bypass_rsa.pem` — Bypass key for token authentication (used with `-i` flag)
+- `~/.aspera/connect/client/aspera_fallback_cert_private_key.pem` — Fallback private key for HTTP fallback (used with `-Y` flag)
+- `~/.aspera/connect/client/aspera_fallback_cert.pem` — Fallback certificate for HTTP fallback (used with `-I` flag)
+- `~/.aspera/connect/client/aspera.conf` — Aspera configuration file (copied from SDK)
+- `~/.aspera/connect/client/meta-data.xml` — SDK metadata
+
+Generated files are stored in `~/.aspera/connect/client/` to keep them separate from SDK files.
+
+Keys are automatically applied to `download` commands.
 
 ## Configuration
 
@@ -57,7 +88,7 @@ accept_v4: true
 ### Global Options
 
 ```bash
-aspera [-c config.yaml] [--url URL] [--user USER] [--password PASS] {list|find|download} ...
+aspera [-c config.yaml] [--url URL] [--user USER] [--password PASS] {list|find|download|setup} ...
 ```
 
 - `-c, --config`: Path to configuration file (default: config.yaml)
@@ -98,7 +129,7 @@ aspera list [/remote/path] [options]
 
 ### Find Files
 
-Search for files matching a pattern (mirrors Ruby's `find` command):
+Search for files matching a pattern:
 
 ```bash
 aspera find /search/root 'pattern'
@@ -155,7 +186,14 @@ aspera download <remote_path>... <local_dest> [options]
   -M, --multi-session N   Number of concurrent transfer sessions (default: 1)
   --gen4                  Use gen4 transfer spec
   --file-id FILE_ID       Gen4 file ID for transfer
+  --retries N             Max retry attempts on transient failure (default: 3)
+  --timeout SECS          Transfer timeout in seconds (default: no timeout)
+  --ascp-path PATH        Path to ascp binary (overrides auto-detection)
 ```
+
+**Retry behavior:** Transfers are automatically retried on transient failures (network errors, token expiry, FASP handshake issues) with exponential backoff. Non-retryable errors (authentication, permission denied, disk full) fail immediately.
+
+**Automatic key application:** After running `setup`, the bypass key and fallback keys are automatically detected and applied to download commands. The bypass key is used for token authentication, and fallback keys enable HTTP fallback transfer.
 
 ## Authentication
 
@@ -169,10 +207,18 @@ Configure `user` and `password` in `config.yaml` or via `--user` / `--password` 
 
 For enhanced security, configure `private_key_file` in `config.yaml` pointing to a PEM-encoded RSA private key. The client will:
 
-1. Generate an SSH public key from the private key (matching Ruby's `Net::SSH::Buffer` format)
+1. Generate an SSH public key from the private key
 2. Send the public key during download setup
 3. Receive an `ssh_private_key` from the API
 4. Use it for ascp authentication via `ASPERA_SCP_SSH_PRIVATE_KEY` environment variable
+
+### Bypass Key Authentication
+
+After running `aspera setup`, the bypass key (`~/.aspera/connect/client/aspera_bypass_rsa.pem`) is automatically used for token authentication. This key enables transfers when the API does not return an `ssh_private_key`, preventing authentication failures and password prompts.
+
+### HTTP Fallback
+
+When the primary FASP transfer fails, the client automatically falls back to HTTP transfer using the fallback key and certificate stored in `~/.aspera/connect/client/`.
 
 ## API Support
 

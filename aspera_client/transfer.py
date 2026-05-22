@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 from .node_api import AsperaNodeClient
 
@@ -17,10 +17,121 @@ find_common_root = AsperaNodeClient.find_common_root
 ASPERA_CONNECT_DIR = os.path.expanduser("~/.aspera/connect")
 ASPERA_ASCP = os.path.join(ASPERA_CONNECT_DIR, "bin", "ascp")
 
+# Key file names in client directory
+_BYPASS_KEY_NAME = "aspera_bypass_rsa.pem"
+_FALLBACK_KEY_NAME = "aspera_fallback_cert_private_key.pem"
+_FALLBACK_CERT_NAME = "aspera_fallback_cert.pem"
+
+_CLIENT_DIR = os.path.join(ASPERA_CONNECT_DIR, "client")
+
+
+def _resolve_sdk_key(filename: str) -> str | None:
+    """Resolve path to a client key file if it exists.
+
+    Args:
+        filename: Name of the key file in the client directory.
+
+    Returns:
+        Full path to the key file, or None if not found.
+    """
+    key_path = os.path.join(_CLIENT_DIR, filename)
+    return key_path if os.path.exists(key_path) else None
+
+
+def get_bypass_key_path() -> str | None:
+    """Get path to the installed bypass key, if available.
+
+    Returns:
+        Full path to bypass key, or None.
+    """
+    return _resolve_sdk_key(_BYPASS_KEY_NAME)
+
+
+def get_fallback_key_path() -> str | None:
+    """Get path to the installed fallback private key, if available.
+
+    Returns:
+        Full path to fallback key, or None.
+    """
+    return _resolve_sdk_key(_FALLBACK_KEY_NAME)
+
+
+def get_fallback_cert_path() -> str | None:
+    """Get path to the installed fallback certificate, if available.
+
+    Returns:
+        Full path to fallback certificate, or None.
+    """
+    return _resolve_sdk_key(_FALLBACK_CERT_NAME)
+
 # Default transfer spec constants
 DEFAULT_REMOTE_USER = "xfer"
 DEFAULT_SSH_PORT = 33001
 DEFAULT_FASP_PORT = 33001
+
+# Retry defaults
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BACKOFF = 2.0
+DEFAULT_RETRY_JITTER = 0.5
+
+# ascp exit code descriptions
+ASCP_EXIT_CODES: dict[int, str] = {
+    0: "Success",
+    1: "General error",
+    2: "Usage error (invalid arguments)",
+    3: "Network error — unable to connect to remote host",
+    4: "Authentication failure",
+    5: "Transfer rate too low — connection dropped",
+    6: "Remote file not found",
+    7: "Remote permission denied",
+    8: "Local disk full",
+    9: "Local permission denied",
+    10: "Transfer cancelled by user",
+    11: "Remote server error",
+    12: "Token expired or invalid",
+    13: "FASP handshake failure",
+    14: "SSL/TLS error",
+    15: "File lock conflict",
+    130: "Interrupted by signal (Ctrl+C)",
+}
+
+# Exit codes that are safe to retry on
+# Note: exit code 1 (General error) is NOT included because it can mask auth failures
+RETRYABLE_EXIT_CODES = {3, 5, 11, 12, 13, 14}
+
+
+T = TypeVar("T")
+
+
+def get_ascp_path() -> str:
+    """Resolve ascp binary path.
+
+    Priority: ASPERA_ASCP env var > ~/.aspera/connect/bin/ascp > system PATH.
+    """
+    # Check environment variable override
+    env_path = os.environ.get("ASPERA_ASCP")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    # Check default install location
+    if os.path.exists(ASPERA_ASCP):
+        return ASPERA_ASCP
+
+    # Search system PATH
+    import shutil
+    found = shutil.which("ascp")
+    if found:
+        return found
+
+    return ASPERA_ASCP
+
+
+def get_ascp_error_message(exit_code: int) -> str:
+    """Get human-readable error message for an ascp exit code."""
+    if exit_code in ASCP_EXIT_CODES:
+        return ASCP_EXIT_CODES[exit_code]
+    return f"Unknown error (exit code {exit_code})"
+
 
 DIRECTION_SEND = "send"
 DIRECTION_RECEIVE = "receive"
@@ -232,6 +343,10 @@ def _build_ascp_command(
     file_list: str | None = None,
     ssh_private_key: str | None = None,
     resume_policy: str = "sparse_csum",
+    bypass_key: str | None = None,
+    http_fallback: bool = False,
+    fallback_key: str | None = None,
+    fallback_cert: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Build the ascp command.
 
@@ -251,6 +366,10 @@ def _build_ascp_command(
         file_list: Path to temp file containing source file list.
         ssh_private_key: PEM-encoded private key for dynamic key auth.
         resume_policy: Resume policy (sparse_csum, full_csum, etc.).
+        bypass_key: Path to bypass key file for token auth.
+        http_fallback: Enable HTTP fallback mode.
+        fallback_key: Path to fallback private key file.
+        fallback_cert: Path to fallback certificate file.
 
     Returns:
         Tuple of (ascp command args, environment variables).
@@ -259,7 +378,7 @@ def _build_ascp_command(
         fasp_port = ssh_port
 
     env: dict[str, str] = {}
-    cmd = [ASPERA_ASCP]
+    cmd = [get_ascp_path()]
 
     # 1. Quiet mode (suppresses native progress bar; we handle progress ourselves)
     if quiet:
@@ -292,6 +411,11 @@ def _build_ascp_command(
     if ssh_private_key:
         env["ASPERA_SCP_SSH_PRIVATE_KEY"] = ssh_private_key
 
+    # 4. Add bypass key for token authentication (ascp -i flag)
+    if bypass_key and os.path.exists(bypass_key):
+        cmd.insert(2, bypass_key)
+        cmd.insert(2, "-i")
+
     # Only add -R when resume=True (user explicitly requested resume)
     if resume:
         policy = fix_resume_policy({"resume_policy": resume_policy})["resume_policy"]
@@ -300,6 +424,15 @@ def _build_ascp_command(
     # 5. File list
     if file_list:
         cmd.extend(["--file-list", file_list])
+
+    # 6. HTTP fallback key and certificate (ascp -Y and -I flags)
+    if http_fallback:
+        if fallback_key and os.path.exists(fallback_key):
+            cmd.insert(2, fallback_key)
+            cmd.insert(2, "-Y")
+        if fallback_cert and os.path.exists(fallback_cert):
+            cmd.insert(2, fallback_cert)
+            cmd.insert(2, "-I")
 
     # 6. SRC then DEST (ascp format: ascp [OPTION] SRC... DEST)
     if remote_path:
@@ -337,6 +470,12 @@ def download_with_progress(
     multi_session: int = 1,
     quiet: bool = False,
     ssh_private_key: str | None = None,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    transfer_timeout: int | None = None,
+    bypass_key: str | None = None,
+    http_fallback: bool = False,
+    fallback_key: str | None = None,
+    fallback_cert: str | None = None,
 ) -> int:
     """Execute ascp transfer with real-time progress display.
 
@@ -347,6 +486,12 @@ def download_with_progress(
         multi_session: Number of concurrent sessions (1=disabled).
         quiet: Suppress ascp progress bar output.
         ssh_private_key: PEM-encoded private key for dynamic key auth.
+        max_retries: Maximum number of retry attempts on transient failure.
+        transfer_timeout: Transfer timeout in seconds (None=no timeout).
+        bypass_key: Path to bypass key file for token auth.
+        http_fallback: Enable HTTP fallback mode.
+        fallback_key: Path to fallback private key file.
+        fallback_cert: Path to fallback certificate file.
 
     Returns:
         Exit code from ascp (0 on success).
@@ -355,9 +500,10 @@ def download_with_progress(
         FileNotFoundError: If ascp binary not found.
         RuntimeError: If transfer fails.
     """
-    if not os.path.exists(ASPERA_ASCP):
+    ascp_path = get_ascp_path()
+    if not os.path.exists(ascp_path):
         raise FileNotFoundError(
-            f"Ascp binary not found at {ASPERA_ASCP}. "
+            f"Ascp binary not found at {ascp_path}. "
             "Please install Aspera Connect SDK first."
         )
 
@@ -374,6 +520,12 @@ def download_with_progress(
     fasp_port = spec.get("fasp_port", DEFAULT_FASP_PORT)
     token = spec.get("token", "")
     ssh_private_key = ssh_private_key or spec.get("ssh_private_key")
+    if not ssh_private_key:
+        print(
+            "Warning: no SSH private key available for authentication. "
+            "The server may require a password or the dynamic key setup may be incomplete.",
+            file=sys.stderr,
+        )
     resume_policy = spec.get("resume_policy", "sparse_csum")
 
     # Get remote paths from the response
@@ -398,6 +550,10 @@ def download_with_progress(
             file_list=file_list_path,
             ssh_private_key=ssh_private_key,
             resume_policy=resume_policy,
+            bypass_key=bypass_key,
+            http_fallback=http_fallback,
+            fallback_key=fallback_key,
+            fallback_cert=fallback_cert,
         )
     else:
         raise RuntimeError(
@@ -427,13 +583,16 @@ def download_with_progress(
         env=env,
         file_list_path=file_list_path,
         quiet=quiet,
+        max_retries=max_retries,
+        transfer_timeout=transfer_timeout,
     )
 
     if return_code == 0:
         elapsed = time.time() - start_time
         print(f"\nTransfer completed successfully! ({elapsed:.1f}s)")
     else:
-        print(f"\nTransfer failed with exit code {return_code}")
+        error_msg = get_ascp_error_message(return_code)
+        print(f"\nTransfer failed with exit code {return_code}: {error_msg}")
 
     return return_code
 
@@ -444,8 +603,10 @@ def _execute_ascp(
     file_list_path: str | None,
     quiet: bool = False,
     redirect_stdout: bool = False,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    transfer_timeout: int | None = None,
 ) -> int:
-    """Execute ascp with optional stdout/stderr redirection.
+    """Execute ascp with optional stdout/stderr redirection and retry logic.
 
     Args:
         cmd: The ascp command list.
@@ -453,9 +614,11 @@ def _execute_ascp(
         file_list_path: Path to temp file list for cleanup.
         quiet: Suppress completion messages.
         redirect_stdout: If True, redirect stdout/stderr to a single stream.
+        max_retries: Maximum number of retry attempts on transient failure.
+        transfer_timeout: Transfer timeout in seconds (None=no timeout).
 
     Returns:
-        Exit code from ascp.
+        Exit code from ascp (0 on success).
     """
     merged_env = os.environ.copy()
     merged_env.update(env)
@@ -465,30 +628,79 @@ def _execute_ascp(
         popen_kwargs["stdout"] = subprocess.STDOUT
         popen_kwargs["stderr"] = subprocess.STDOUT
 
-    process = subprocess.Popen(cmd, **popen_kwargs)
+    last_exit_code: int = 1
+    for attempt in range(max_retries + 1):
+        process = subprocess.Popen(cmd, **popen_kwargs)
 
-    try:
-        process.wait()
-    except KeyboardInterrupt:
-        if not redirect_stdout:
-            print("\nTransfer interrupted by user.", file=sys.stderr)
-        process.terminate()
         try:
-            process.wait(timeout=5)
+            if transfer_timeout:
+                process.wait(timeout=transfer_timeout)
+            else:
+                process.wait()
         except subprocess.TimeoutExpired:
-            process.kill()
-        return 130
+            if not quiet:
+                print("\nTransfer timed out.", file=sys.stderr)
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            last_exit_code = 1
+            if attempt < max_retries:
+                delay = DEFAULT_RETRY_BACKOFF ** attempt + DEFAULT_RETRY_JITTER * (attempt + 1)
+                print(
+                    f"  Retry {attempt + 1}/{max_retries} after timeout "
+                    f"({delay:.1f}s)",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                continue
+            return 1
 
-    if file_list_path:
-        try:
-            os.unlink(file_list_path)
-        except OSError:
-            pass
+        except KeyboardInterrupt:
+            print("\nTransfer interrupted by user.", file=sys.stderr)
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            return 130
 
-    if not quiet and not redirect_stdout:
-        if process.returncode == 0:
-            print("\nTransfer completed successfully!")
+        last_exit_code = process.returncode
+
+        if file_list_path:
+            try:
+                os.unlink(file_list_path)
+            except OSError:
+                pass
+
+        # Check if exit code is retryable
+        if last_exit_code == 0:
+            if not quiet and not redirect_stdout:
+                print("\nTransfer completed successfully!")
+            return 0
+
+        if last_exit_code not in RETRYABLE_EXIT_CODES:
+            # Non-retryable error — fail immediately
+            if not quiet and not redirect_stdout:
+                error_msg = get_ascp_error_message(last_exit_code)
+                print(f"\nTransfer failed with exit code {last_exit_code}: {error_msg}")
+            return last_exit_code
+
+        if attempt < max_retries:
+            delay = DEFAULT_RETRY_BACKOFF ** attempt + DEFAULT_RETRY_JITTER * (attempt + 1)
+            print(
+                f"  Retry {attempt + 1}/{max_retries} (exit code {last_exit_code}) "
+                f"after {delay:.1f}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
         else:
-            print(f"\nTransfer failed with exit code {process.returncode}")
+            error_msg = get_ascp_error_message(last_exit_code)
+            if not quiet and not redirect_stdout:
+                print(f"\nTransfer failed with exit code {last_exit_code}: {error_msg}")
+            return last_exit_code
 
-    return process.returncode
+    return last_exit_code

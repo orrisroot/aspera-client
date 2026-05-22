@@ -21,3 +21,10 @@ accept_v4: true
 # When set, the public key is sent in download_setup request and
 # the private key is passed to ascp via ASPERA_SCP_SSH_PRIVATE_KEY env var.
 # private_key_file: "/path/to/aspera_private_key.pem"
+
+# Before using download commands, run: aspera setup
+# This installs the Aspera Connect SDK and generates:
+#   - Bypass key: ~/.aspera/connect/client/aspera_bypass_rsa.pem (token auth)
+#   - Fallback key: ~/.aspera/connect/client/aspera_fallback_cert_private_key.pem (HTTP fallback)
+#   - Fallback cert: ~/.aspera/connect/client/aspera_fallback_cert.pem (HTTP fallback)
+# These keys are automatically applied to download commands.
