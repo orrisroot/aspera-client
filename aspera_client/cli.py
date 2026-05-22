@@ -188,7 +188,6 @@ def main() -> None:
         "--file-id",
         help="Gen4 file ID to search from",
     )
-
     # download subcommand
     download_parser = subparsers.add_parser("download", help="Download files using ascp")
     download_parser.add_argument(

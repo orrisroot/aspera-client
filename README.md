@@ -140,7 +140,7 @@ Examples:
 aspera find / '*.txt'
 aspera find / '^test.*'
 aspera find / 'size>1000'
-aspera find / -r '*.log'
+aspera find / '*.log' -r
 ```
 
 #### Find Options
