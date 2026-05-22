@@ -17,5 +17,7 @@ path_prefix: ""
 # Request timeout in seconds (default: 30)
 timeout: 30
 
-# Optional: Aspera SSH identity key path
-# identity_file: "/path/to/aspera_id_dsa.openssh"
+# Optional: RSA private key for dynamic key authentication.
+# When set, the public key is sent in download_setup request and
+# the private key is passed to ascp via ASPERA_SCP_SSH_PRIVATE_KEY env var.
+# private_key_file: "/path/to/aspera_private_key.pem"
