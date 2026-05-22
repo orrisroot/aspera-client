@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import urllib.parse
 import yaml
+
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
@@ -24,6 +26,23 @@ def load_config(config_path: str) -> dict:
     return config
 
 
+def resolve_host_port(args: argparse.Namespace, config: dict) -> tuple[str, int]:
+    """Resolve host and port from --url or --host/--port or config.
+
+    Priority: --url flag > config url > --host/--port flags > config host/port > defaults.
+    """
+    url = args.url or config.get("url")
+    if url:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 9092
+        return host, port
+
+    host = getattr(args, "host", None) or config.get("host", "localhost")
+    port = getattr(args, "port", None) if getattr(args, "port", None) is not None else config.get("port", 9092)
+    return host, int(port)
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
@@ -35,8 +54,7 @@ def main() -> None:
         default="config.yaml",
         help="Path to configuration file (default: config.yaml)",
     )
-    parser.add_argument("--host", help="Aspera Node server hostname (overrides config)")
-    parser.add_argument("--port", type=int, help="Node API port (overrides config)")
+    parser.add_argument("--url", help="Aspera Node server URL (overrides config, e.g. https://host:9092)")
     parser.add_argument("--user", help="Username (overrides config)")
     parser.add_argument("--password", help="Password (overrides config)")
 
@@ -90,7 +108,63 @@ def main() -> None:
     )
     list_parser.add_argument(
         "--fields",
-        help="Comma-separated list of fields to display (default: name,type,size,modified)",
+        help="Comma-separated list of fields. Use '-' prefix to exclude (e.g., '-id,-path')",
+    )
+    # Gen4 options
+    list_parser.add_argument(
+        "--gen4",
+        action="store_true",
+        help="Use gen4 API (Accept-Version: 4.0, iteration_token pagination)",
+    )
+    list_parser.add_argument(
+        "--file-id",
+        help="Gen4 file ID to browse (instead of path)",
+    )
+    list_parser.add_argument(
+        "--matcher",
+        help="File matcher pattern (glob, regex, or None for all). Used with --find or --type filter.",
+    )
+
+    find_parser = subparsers.add_parser("find", help="Find files matching a pattern")
+    find_parser.add_argument(
+        "path",
+        nargs="?",
+        default="/",
+        help="Search root path (default: /)",
+    )
+    find_parser.add_argument(
+        "pattern",
+        help="Glob pattern, regex, or field=value to match (e.g., '*.txt', 'size>1000')",
+    )
+    find_parser.add_argument(
+        "-r", "--recursive",
+        action="store_true",
+        help="Recursively search subdirectories",
+    )
+    find_parser.add_argument(
+        "-n", "--count",
+        type=int,
+        default=1000,
+        help="Max entries per page (default: 1000)",
+    )
+    find_parser.add_argument(
+        "-f", "--format",
+        choices=["table", "json", "csv"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    find_parser.add_argument(
+        "--fields",
+        help="Comma-separated list of fields to display",
+    )
+    find_parser.add_argument(
+        "--gen4",
+        action="store_true",
+        help="Use gen4 API",
+    )
+    find_parser.add_argument(
+        "--file-id",
+        help="Gen4 file ID to search from",
     )
 
     # download subcommand
@@ -131,10 +205,19 @@ def main() -> None:
         default=1,
         help="Number of concurrent transfer sessions (default: 1)",
     )
+    download_parser.add_argument(
+        "--gen4",
+        action="store_true",
+        help="Use gen4 transfer spec",
+    )
+    download_parser.add_argument(
+        "--file-id",
+        help="Gen4 file ID for transfer",
+    )
 
     args = parser.parse_args()
 
-    if args.command == "download" and args.multi_session < 1:
+    if args.command == "download" and hasattr(args, "multi_session") and args.multi_session < 1:
         parser.error("--multi-session must be >= 1")
 
     if not args.command:
@@ -144,6 +227,9 @@ def main() -> None:
     if args.command == "list":
         from .list import cmd_list
         exit_code = cmd_list(args)
+    elif args.command == "find":
+        from .list import cmd_find
+        exit_code = cmd_find(args)
     elif args.command == "download":
         from .download import cmd_download
         exit_code = cmd_download(args)

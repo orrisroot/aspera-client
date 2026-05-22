@@ -9,29 +9,172 @@ import tempfile
 import time
 from typing import Any
 
+from .node_api import AsperaNodeClient
+
+find_common_root = AsperaNodeClient.find_common_root
+
 # Default path to Aspera Connect installer
 ASPERA_CONNECT_DIR = os.path.expanduser("~/.aspera/connect")
 ASPERA_ASCP = os.path.join(ASPERA_CONNECT_DIR, "bin", "ascp")
 
- # Default transfer spec constants
+# Default transfer spec constants
 DEFAULT_REMOTE_USER = "xfer"
 DEFAULT_SSH_PORT = 33001
 DEFAULT_FASP_PORT = 33001
 
+DIRECTION_SEND = "send"
+DIRECTION_RECEIVE = "receive"
 
-def _extract_spec(token_data: dict[str, Any]) -> dict[str, Any]:
-    """Extract transfer spec from API response."""
-    transfer_specs_list = token_data.get("transfer_specs", [])
-    if transfer_specs_list:
-        return transfer_specs_list[0].get("transfer_spec", {})
-    return {}
+POLICY_FIX = {
+    "none": "none",
+    "attrs": "attributes",
+    "sparse_csum": "sparse_checksum",
+    "full_csum": "full_checksum",
+}
 
 
-def _build_file_list(paths: list[dict[str, Any]], source_root: str = "") -> tuple[str | None, str]:
+def fix_resume_policy(transfer_spec: dict[str, Any]) -> dict[str, Any]:
+    """Fix resume policy discrepancy between gen3 and gen4.
+
+    .fix_transferd_resume_policy.
+    """
+    if "resume_policy" in transfer_spec:
+        policy = transfer_spec["resume_policy"]
+        if policy in POLICY_FIX:
+            transfer_spec["resume_policy"] = POLICY_FIX[policy]
+    return transfer_spec
+
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+
+def build_transfer_spec_gen3(
+    remote_host: str,
+    remote_user: str,
+    ssh_port: int,
+    fasp_port: int,
+    token: str,
+    paths: list[dict[str, Any]],
+    direction: str = DIRECTION_RECEIVE,
+    destination_root: str = "",
+    resume_policy: str = "sparse_csum",
+    create_dir: bool = True,
+    extra_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a gen3-style transfer spec dict.
+
+    .
+
+    Args:
+        remote_host: Remote Aspera node hostname.
+        remote_user: Remote transfer user.
+        ssh_port: SSH port.
+        fasp_port: FASP UDP port.
+        token: Transfer token.
+        paths: List of path dicts with 'source' key.
+        direction: 'send' or 'receive'.
+        destination_root: Local destination directory.
+        resume_policy: Resume policy.
+        create_dir: Create destination directory.
+        extra_spec: Additional transfer spec fields to merge.
+
+    Returns:
+        Transfer spec dict.
+    """
+    spec: dict[str, Any] = {
+        "direction": direction,
+        "token": token,
+        "remote_host": remote_host,
+        "remote_user": remote_user,
+        "ssh_port": ssh_port,
+        "fasp_port": fasp_port,
+        "paths": paths,
+        "create_dir": create_dir,
+        "resume_policy": resume_policy,
+    }
+
+    if destination_root:
+        spec["destination_root"] = destination_root
+
+    if extra_spec:
+        spec.update(extra_spec)
+
+    return spec
+
+
+def build_transfer_spec_gen4(
+    remote_host: str,
+    remote_user: str,
+    ssh_port: int,
+    fasp_port: int,
+    access_key: str,
+    file_id: str,
+    paths: list[dict[str, Any]],
+    direction: str = DIRECTION_RECEIVE,
+    destination_root: str = "",
+    extra_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a gen4-style transfer spec dict.
+
+    .transfer_spec_gen4.
+
+    Args:
+        remote_host: Remote Aspera node hostname.
+        remote_user: Remote transfer user.
+        ssh_port: SSH port.
+        fasp_port: FASP UDP port.
+        access_key: Access key identifier.
+        file_id: Source folder file ID.
+        paths: List of path dicts.
+        direction: 'send' or 'receive'.
+        destination_root: Local destination directory.
+        extra_spec: Additional transfer spec fields.
+
+    Returns:
+        Transfer spec dict.
+    """
+    spec: dict[str, Any] = {
+        "direction": direction,
+        "token": access_key,
+        "remote_host": remote_host,
+        "remote_user": remote_user,
+        "ssh_port": ssh_port,
+        "fasp_port": fasp_port,
+        "paths": paths,
+        "create_dir": True,
+        "resume_policy": "sparse_csum",
+        "tags": {
+            "aspera": {
+                "node": {
+                    "access_key": access_key,
+                    "file_id": file_id,
+                }
+            }
+        },
+    }
+
+    if destination_root:
+        spec["destination_root"] = destination_root
+
+    if extra_spec:
+        spec.update(extra_spec)
+
+    return spec
+
+
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+
+def build_file_list(
+    paths: list[dict[str, Any]],
+    source_root: str = "",
+) -> tuple[str | None, str]:
     """Build file list for multiple paths.
 
     If multiple sources exist, writes them to a temp file and returns the path.
     Otherwise returns the single source path.
+
+    .
 
     Args:
         paths: List of path dicts with 'source' key.
@@ -71,6 +214,10 @@ def _build_file_list(paths: list[dict[str, Any]], source_root: str = "") -> tupl
         return None, remote_path
 
 
+# -------------------------------------------------------------------------
+# ascp command building
+# -------------------------------------------------------------------------
+
 def _build_ascp_command(
     token: str,
     remote_host: str,
@@ -84,6 +231,7 @@ def _build_ascp_command(
     quiet: bool = False,
     file_list: str | None = None,
     ssh_private_key: str | None = None,
+    resume_policy: str = "sparse_csum",
 ) -> tuple[list[str], dict[str, str]]:
     """Build the ascp command.
 
@@ -102,6 +250,7 @@ def _build_ascp_command(
         quiet: Suppress ascp progress bar output.
         file_list: Path to temp file containing source file list.
         ssh_private_key: PEM-encoded private key for dynamic key auth.
+        resume_policy: Resume policy (sparse_csum, full_csum, etc.).
 
     Returns:
         Tuple of (ascp command args, environment variables).
@@ -143,23 +292,43 @@ def _build_ascp_command(
     if ssh_private_key:
         env["ASPERA_SCP_SSH_PRIVATE_KEY"] = ssh_private_key
 
-    # 5. Resume transfer
+    # Only add -R when resume=True (user explicitly requested resume)
     if resume:
-        cmd.append("-R")
+        policy = fix_resume_policy({"resume_policy": resume_policy})["resume_policy"]
+        cmd.extend(["-R", policy])
 
-    # 6. File list
+    # 5. File list
     if file_list:
         cmd.extend(["--file-list", file_list])
 
-    # 7. SRC then DEST (ascp format: ascp [OPTION] SRC... DEST)
+    # 6. SRC then DEST (ascp format: ascp [OPTION] SRC... DEST)
     if remote_path:
         cmd.append(f"{remote_user}@{remote_host}:{remote_path}")
 
-    # 8. Destination (MUST be last argument)
+    # 7. Destination (MUST be last argument)
     cmd.append(local_dest)
 
     return cmd, env
 
+
+# -------------------------------------------------------------------------
+# Extract spec from API response
+# -------------------------------------------------------------------------
+
+def extract_spec(token_data: dict[str, Any]) -> dict[str, Any]:
+    """Extract transfer spec from API response.
+
+    .
+    """
+    transfer_specs_list = token_data.get("transfer_specs", [])
+    if transfer_specs_list:
+        return transfer_specs_list[0].get("transfer_spec", {})
+    return {}
+
+
+# -------------------------------------------------------------------------
+# Transfer execution
+# -------------------------------------------------------------------------
 
 def download_with_progress(
     token_data: dict[str, Any],
@@ -193,7 +362,6 @@ def download_with_progress(
         )
 
     # Extract transfer specs from API response (nested per OpenAPI spec)
-    # Response shape: {"transfer_specs": [{"transfer_spec": {...}}]}
     transfer_specs_list = token_data.get("transfer_specs", [])
     if transfer_specs_list:
         spec = transfer_specs_list[0].get("transfer_spec", {})
@@ -206,13 +374,13 @@ def download_with_progress(
     fasp_port = spec.get("fasp_port", DEFAULT_FASP_PORT)
     token = spec.get("token", "")
     ssh_private_key = ssh_private_key or spec.get("ssh_private_key")
+    resume_policy = spec.get("resume_policy", "sparse_csum")
 
     # Get remote paths from the response
-    # paths[].source is relative to source_root per OpenAPI spec
     source_root = spec.get("source_root", "")
     paths = spec.get("paths", [])
 
-    file_list_path, remote_path = _build_file_list(paths, source_root)
+    file_list_path, remote_path = build_file_list(paths, source_root)
 
     # Build ascp command
     if (remote_path and remote_host) or file_list_path:
@@ -229,6 +397,7 @@ def download_with_progress(
             quiet=quiet,
             file_list=file_list_path,
             ssh_private_key=ssh_private_key,
+            resume_policy=resume_policy,
         )
     else:
         raise RuntimeError(

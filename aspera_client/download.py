@@ -6,14 +6,27 @@ import argparse
 import os
 import sys
 import time
+import urllib.parse
 from typing import Any
 
 import requests.exceptions
 
-from .cli import load_config
+from .cli import load_config, resolve_host_port
 from .formatter import format_download_result
-from .node_api import AsperaAuthError, AsperaApiError
-from .transfer import ASPERA_ASCP, _build_ascp_command, _build_file_list, _extract_spec, _execute_ascp, download_with_progress
+from .node_api import AsperaAuthError, AsperaApiError, AsperaNodeClient
+from .transfer import (
+    ASPERA_ASCP,
+    DIRECTION_RECEIVE,
+    _build_ascp_command,
+    _execute_ascp,
+    build_file_list,
+    build_transfer_spec_gen3,
+    build_transfer_spec_gen4,
+    extract_spec,
+    find_common_root,
+    fix_resume_policy,
+    download_with_progress,
+)
 
 
 def cmd_download(args: argparse.Namespace) -> int:
@@ -25,18 +38,15 @@ def cmd_download(args: argparse.Namespace) -> int:
     Returns:
         Exit code.
     """
-    from .node_api import AsperaNodeClient
-
     config = load_config(args.config)
 
-    host = args.host or config.get("host", "localhost")
-    port = args.port or config.get("port", 9092)
+    host, port = resolve_host_port(args, config)
     user = args.user or config.get("user")
     password = args.password or config.get("password")
     verify_ssl = config.get("verify_ssl", True)
-    path_prefix = config.get("path_prefix", "")
     timeout = config.get("timeout", 30)
     private_key_file = config.get("private_key_file")
+    accept_v4 = config.get("accept_v4", True)
 
     remote_paths = args.remote_path
     local_dest = args.local_dest
@@ -45,6 +55,8 @@ def cmd_download(args: argparse.Namespace) -> int:
     output_format = args.format
     quiet = args.quiet
     multi_session = args.multi_session
+    use_gen4 = args.gen4
+    file_id = getattr(args, "file_id", None)
 
     # Check ascp availability
     if not os.path.exists(ASPERA_ASCP):
@@ -69,9 +81,9 @@ def cmd_download(args: argparse.Namespace) -> int:
             user=user,
             password=password,
             verify_ssl=verify_ssl,
-            path_prefix=path_prefix,
             timeout=timeout,
             dynamic_key=dynamic_key,
+            accept_v4=accept_v4,
         ) as client:
             results: list[dict[str, Any]] = []
             total_start = time.time()
@@ -84,7 +96,7 @@ def cmd_download(args: argparse.Namespace) -> int:
                         remote_path=remote_path,
                         local_dest=local_dest,
                     )
-                    spec = _extract_spec(token_data)
+                    spec = extract_spec(token_data)
                     print()
                     print(f"=== Dry Run: {remote_path} ===")
                     print(f"  remote_host: {spec.get('remote_host', '')}")
@@ -104,6 +116,32 @@ def cmd_download(args: argparse.Namespace) -> int:
                     })
                     continue
 
+                # Gen4 transfer (handles all paths at once)
+                if use_gen4 and file_id:
+                    return_code = _download_gen4(
+                        client=client,
+                        file_id=file_id,
+                        remote_paths=remote_paths,
+                        local_dest=local_dest,
+                        resume=resume,
+                        multi_session=multi_session,
+                        quiet=quiet,
+                    )
+                    elapsed = time.time() - total_start
+                    status = "success" if return_code == 0 else "failed"
+                    results.append({
+                        "source": remote_paths[0],
+                        "status": status,
+                        "exit_code": return_code,
+                        "elapsed": elapsed,
+                    })
+                    if return_code != 0:
+                        print(f"\nDownload failed for: {remote_paths[0]}", file=sys.stderr)
+                    else:
+                        print(f"\nDownload completed: {remote_paths[0]} ({elapsed:.1f}s)", file=sys.stderr)
+                    break
+
+                # Gen3 transfer
                 token_data = client.get_download_token(
                     remote_path=remote_path,
                     local_dest=local_dest,
@@ -121,7 +159,7 @@ def cmd_download(args: argparse.Namespace) -> int:
                         multi_session=multi_session,
                     )
                 else:
-                    spec = _extract_spec(token_data)
+                    spec = extract_spec(token_data)
                     return_code = download_with_progress(
                         token_data=token_data,
                         local_dest=local_dest,
@@ -190,6 +228,153 @@ def cmd_download(args: argparse.Namespace) -> int:
         return 1
 
 
+def _download_gen4(
+    client: AsperaNodeClient,
+    file_id: str,
+    remote_paths: list[str],
+    local_dest: str,
+    resume: bool = False,
+    multi_session: int = 1,
+    quiet: bool = False,
+) -> int:
+    """Execute gen4 download transfer.
+
+    
+    1. Find common root of paths
+    2. Build gen4 transfer spec
+    3. Execute ascp
+
+    Args:
+        client: AsperaNodeClient instance.
+        file_id: Root file ID for the transfer.
+        remote_paths: List of remote paths to download.
+        local_dest: Local destination directory.
+        resume: Enable resume.
+        multi_session: Number of concurrent sessions.
+        quiet: Suppress output.
+
+    Returns:
+        Exit code from ascp.
+    """
+    # Build paths for transfer spec
+    path_dicts = [{"source": p} for p in remote_paths]
+
+    common_root, source_paths = find_common_root(path_dicts)
+
+    # Resolve the common root to a file_id
+    if common_root:
+        try:
+            resolved = client.resolve_fid(file_id, "/".join(common_root))
+            transfer_file_id = resolved["file_id"]
+        except AsperaApiError:
+            transfer_file_id = file_id
+    else:
+        transfer_file_id = file_id
+
+    # Get transport params from API
+    try:
+        info = client.get_info()
+        remote_user = info.get("transfer_user", "xfer")
+        ssh_port = 33001
+        fasp_port = 33001
+    except Exception:
+        remote_user = "xfer"
+        ssh_port = 33001
+        fasp_port = 33001
+
+    # Build gen4 transfer spec
+    transfer_spec = build_transfer_spec_gen4(
+        remote_host=urllib.parse.urlparse(client.base_url).hostname or "",
+        remote_user=remote_user,
+        ssh_port=ssh_port,
+        fasp_port=fasp_port,
+        access_key=client.user or "",
+        file_id=transfer_file_id,
+        paths=source_paths,
+        direction=DIRECTION_RECEIVE,
+        destination_root=local_dest,
+    )
+
+    # Add dynamic key if available
+    if client._dynamic_key:
+        AsperaNodeClient.add_private_key_to_spec(transfer_spec, client._dynamic_key)
+
+    # Fix resume policy
+    if resume:
+        transfer_spec["resume_policy"] = "sparse_csum"
+
+    # Build ascp command from transfer spec
+    return _execute_transfer_spec(
+        transfer_spec=transfer_spec,
+        local_dest=local_dest,
+        multi_session=multi_session,
+        quiet=quiet,
+        resume=resume,
+    )
+
+
+def _execute_transfer_spec(
+    transfer_spec: dict[str, Any],
+    local_dest: str,
+    multi_session: int = 1,
+    quiet: bool = False,
+    resume: bool = False,
+) -> int:
+    """Execute ascp from a transfer spec dict.
+
+    .start_transfer.
+
+    Args:
+        transfer_spec: Transfer spec dict.
+        local_dest: Local destination.
+        multi_session: Number of sessions.
+        quiet: Quiet mode.
+        resume: Enable resume policy.
+
+    Returns:
+        Exit code.
+    """
+    remote_host = transfer_spec.get("remote_host", "")
+    remote_user = transfer_spec.get("remote_user", "xfer")
+    ssh_port = transfer_spec.get("ssh_port", 33001)
+    fasp_port = transfer_spec.get("fasp_port", 33001)
+    token = transfer_spec.get("token", "")
+    ssh_private_key = transfer_spec.get("ssh_private_key")
+    paths = transfer_spec.get("paths", [])
+    source_root = transfer_spec.get("source_root", "")
+    resume_policy = transfer_spec.get("resume_policy", "sparse_csum")
+
+    if not remote_host or not token:
+        raise RuntimeError("Transfer spec missing required fields: remote_host, token")
+
+    file_list_path, remote_path = build_file_list(paths, source_root)
+
+    cmd, env = _build_ascp_command(
+        token=token,
+        remote_host=remote_host,
+        remote_user=remote_user,
+        ssh_port=ssh_port,
+        fasp_port=fasp_port,
+        remote_path=remote_path,
+        local_dest=local_dest,
+        multi_session=multi_session,
+        quiet=quiet,
+        file_list=file_list_path,
+        ssh_private_key=ssh_private_key,
+        resume=resume,
+        resume_policy=resume_policy,
+    )
+
+    os.makedirs(local_dest, exist_ok=True)
+
+    return _execute_ascp(
+        cmd=cmd,
+        env=env,
+        file_list_path=file_list_path,
+        quiet=quiet,
+    )
+
+
 def _download_with_output_redirect(
     token_data: dict[str, Any],
     local_dest: str,
@@ -212,7 +397,7 @@ def _download_with_output_redirect(
     source_root = spec.get("source_root", "")
     paths = spec.get("paths", [])
 
-    file_list_path, remote_path = _build_file_list(paths, source_root)
+    file_list_path, remote_path = build_file_list(paths, source_root)
 
     if (not remote_path and not file_list_path) or not remote_host:
         raise RuntimeError("Could not build ascp command. API response missing required transfer specs.")

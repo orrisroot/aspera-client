@@ -1,21 +1,21 @@
 # Aspera Node API Configuration
 # Copy this file to config.yaml and fill in your settings.
 
-# Aspera Node server settings
-host: "node.example.com"
-port: 9092
+# Aspera Node server URL (e.g., https://node.example.com:9092)
+# This replaces the separate `host` and `port` settings.
+url: "https://node.example.com:9092"
+
 user: "node_user"
 password: "your_password"
 
 # SSL verification (set to false for self-signed certificates)
-verify_ssl: false
-
-# URL path prefix (e.g., "/node_api" for servers behind a proxy)
-# Leave empty for direct access (e.g., https://host:9092/)
-path_prefix: ""
+verify_ssl: true
 
 # Request timeout in seconds (default: 30)
 timeout: 30
+
+# Gen4 API support (set to false to disable Accept-Version: 4.0 features)
+accept_v4: true
 
 # Optional: RSA private key for dynamic key authentication.
 # When set, the public key is sent in download_setup request and

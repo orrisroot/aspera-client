@@ -8,6 +8,9 @@ import json
 from typing import Any
 
 
+FIELDS_EXCLUDE = "-"
+
+
 def format_size(size: int | float) -> str:
     """Format file size in human-readable form."""
     if size == 0:
@@ -37,6 +40,8 @@ def _get_field(entry: dict[str, Any], field: str) -> str:
         return format_size(entry.get("size", 0))
     elif field == "modified":
         return entry.get("modified", "")
+    elif field == "modified_time":
+        return entry.get("modified_time", "")
     elif field == "path":
         return entry.get("path", "")
     elif field == "extension":
@@ -46,23 +51,83 @@ def _get_field(entry: dict[str, Any], field: str) -> str:
         return ""
     elif field == "depth":
         return str(entry.get("depth", 0))
+    elif field == "recursive_size":
+        return format_size(entry.get("recursive_size", 0))
+    elif field == "access_level":
+        return entry.get("access_level", "")
     return str(entry.get(field, ""))
+
+
+def _compute_fields(
+    entries: list[dict[str, Any]],
+    raw_fields: str | None,
+) -> list[str]:
+    """Compute the list of fields to display.
+
+    Supports:
+    - Specific field names
+    - '-' prefix for exclusion (e.g., '-id')
+    - '+' prefix for inclusion only
+    - All fields if None
+    """
+    if raw_fields is None:
+        # Get all fields from all entries
+        return sorted({k for e in entries for k in e.keys()})
+
+    parts = [f.strip() for f in raw_fields.split(",") if f.strip()]
+    result: list[str] = []
+    excludes: list[str] = []
+    includes_only = False
+
+    for part in parts:
+        if part.startswith(FIELDS_EXCLUDE):
+            excludes.append(part[1:])
+        elif part.startswith("+"):
+            includes_only = True
+            result.append(part[1:])
+        else:
+            result.append(part)
+
+    # Get all available fields
+    all_fields = sorted({k for e in entries for k in e.keys()})
+
+    if not result and not excludes:
+        return all_fields
+
+    if includes_only:
+        return result
+
+    # Start with all fields, remove excludes
+    if not result:
+        result = [f for f in all_fields if f not in excludes]
+    else:
+        # Use specified fields, remove excludes
+        result = [f for f in result if f not in excludes]
+
+    return result
 
 
 def format_list_table(
     entries: list[dict[str, Any]],
     path: str,
-    fields: list[str] | None = None,
+    fields: str | None = None,
 ) -> str:
-    """Format list entries as a human-readable table."""
-    if fields is None:
-        fields = ["name", "type", "size", "modified"]
+    """Format list entries as a human-readable table.
+
+    Args:
+        entries: List of file/directory entry dicts.
+        path: Remote directory path.
+        fields: Comma-separated field names, with '-' prefix for exclusion.
+    """
+    all_fields = _compute_fields(entries, fields)
+    if not all_fields:
+        all_fields = ["name", "type", "size", "modified"]
 
     lines = [f"Directory: {path}", ""]
 
     for entry in entries:
         parts = []
-        for field in fields:
+        for field in all_fields:
             val = _get_field(entry, field)
             parts.append(val if val else "-")
         lines.append("  " + "    ".join(parts))
