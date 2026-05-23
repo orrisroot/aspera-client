@@ -23,7 +23,7 @@ pip install -e .
 Or:
 
 ```bash
-pip install requests pyyaml cryptography
+pip install requests pyyaml cryptography rich
 ```
 
 ## Setup
@@ -108,6 +108,24 @@ aspera list /
 aspera list /shared/documents
 aspera list / --gen4 --file-id abc123
 ```
+
+Output:
+```
+Directory: /shared/documents (3 items)
+
+   Size   Modified          Name
+dr -      2026-05-24T00:00:00Z reports
+fw 12K    2026-05-23T12:00:00Z readme.txt
+l- 256    2026-05-23T11:00:00Z latest
+```
+
+**Attribute column** (2 chars): `d`=directory, `f`=file, `l`=symlink + `r`=read, `w`=write, `a`=admin, `-`=none
+
+**Color coding**:
+- Directories → blue (bold)
+- Symlinks → cyan
+- Archives (.zip, .gz, etc.) → magenta
+- Media files (.jpg, .mp4, .mp3, etc.) → yellow
 
 #### List Options
 

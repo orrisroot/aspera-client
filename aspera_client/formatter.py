@@ -14,9 +14,9 @@ FIELDS_EXCLUDE = "-"
 def format_size(size: int | float) -> str:
     """Format file size in human-readable form."""
     if size == 0:
-        return "0 B"
+        return "0"
 
-    units = ["B", "KB", "MB", "GB", "TB"]
+    units = ["", "K", "M", "G", "T"]
     size = float(size)
     unit_index = 0
 
@@ -25,8 +25,8 @@ def format_size(size: int | float) -> str:
         unit_index += 1
 
     if unit_index == 0:
-        return f"{int(size)} B"
-    return f"{size:.1f} {units[unit_index]}"
+        return f"{int(size)}"
+    return f"{size:.1f}{units[unit_index]}"
 
 
 def _get_field(entry: dict[str, Any], field: str) -> str:
@@ -71,8 +71,7 @@ def _compute_fields(
     - All fields if None
     """
     if raw_fields is None:
-        # Get all fields from all entries
-        return sorted({k for e in entries for k in e.keys()})
+        return list(LS_DEFAULT_FIELDS)
 
     parts = [f.strip() for f in raw_fields.split(",") if f.strip()]
     result: list[str] = []
@@ -107,32 +106,178 @@ def _compute_fields(
     return result
 
 
+# File type extensions for LS_COLORS-like coloring
+_COMPRESS_EXTS = {".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz", ".tbz2"}
+_MEDIA_EXTS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico",
+    ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv",
+    ".mp3", ".wav", ".flac", ".aac", ".ogg",
+}
+
+LS_DEFAULT_FIELDS = ("size", "modified", "name")
+
+
+def _get_type_indicator(entry_type: str) -> str:
+    """Return a type indicator character."""
+    if entry_type in ("directory", "container"):
+        return "d"
+    elif entry_type == "symbolic_link":
+        return "l"
+    return "f"
+
+
+def _abbreviate_access(access_level: str) -> str:
+    """Abbreviate access_level to a single character."""
+    access = (access_level or "").lower().strip()
+    if access.startswith("r"):
+        return "r"
+    elif access.startswith("w"):
+        return "w"
+    elif access.startswith("a"):
+        return "a"
+    return "-"
+
+
+def _get_file_color_style(name: str, entry_type: str) -> str:
+    """Return a rich color style based on file type (LS_COLORS-like)."""
+    if entry_type in ("directory", "container"):
+        return "bold blue"
+    elif entry_type == "symbolic_link":
+        return "cyan"
+
+    ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext in _COMPRESS_EXTS:
+        return "magenta"
+    elif ext in _MEDIA_EXTS:
+        return "yellow"
+    return ""
+
+
 def format_list_table(
     entries: list[dict[str, Any]],
     path: str,
     fields: str | None = None,
-) -> str:
-    """Format list entries as a human-readable table.
+    count: int | None = None,
+) -> None:
+    """Format list entries in ls-like style.
+
+    Uses ls -l inspired formatting with LS_COLORS-like coloring.
+    Respects --fields to control which columns are displayed.
 
     Args:
         entries: List of file/directory entry dicts.
         path: Remote directory path.
-        fields: Comma-separated field names, with '-' prefix for exclusion.
+        fields: Comma-separated field names (or None for default).
+        count: Number of entries to display in header.
     """
-    all_fields = _compute_fields(entries, fields)
-    if not all_fields:
-        all_fields = ["name", "type", "size", "modified"]
+    from rich.console import Console
 
-    lines = [f"Directory: {path}", ""]
+    console = Console()
+    display_fields = _compute_fields(entries, fields)
+    if not display_fields:
+        display_fields = list(LS_DEFAULT_FIELDS)
 
-    for entry in entries:
-        parts = []
-        for field in all_fields:
+    _print_ls_style(console, entries, path, display_fields, count=count)
+
+
+def _print_ls_style(
+    console: Any,  # rich.console.Console
+    entries: list[dict[str, Any]],
+    path: str,
+    fields: list[str],
+    count: int | None = None,
+) -> None:
+    """Print entries in ls -l style with color.
+
+    Args:
+        console: Rich console instance.
+        entries: List of file/directory entry dicts.
+        path: Remote directory path.
+        fields: Field names to display (e.g. ["name", "type", "size", "modified"]).
+        count: Number of entries to display in header.
+    """
+    from rich.text import Text
+
+    if count is not None:
+        console.print(f"[bold]Directory:[/bold] {path} ({count} items)")
+    else:
+        console.print(f"[bold]Directory:[/bold] {path}")
+    console.print()
+
+    if not entries:
+        console.print("  (no entries)")
+        return
+
+    # Separate name (always last, colored) from other fields
+    mid_fields = [f for f in fields if f != "name"]
+    has_name = "name" in fields
+
+    # Compute column widths for mid fields
+    col_widths: dict[str, int] = {}
+    for field in mid_fields:
+        width = len(field.replace("_", " ").title())
+        for entry in entries:
             val = _get_field(entry, field)
-            parts.append(val if val else "-")
-        lines.append("  " + "    ".join(parts))
+            if len(val) > width:
+                width = len(val)
+        col_widths[field] = max(width, 4)
 
-    return "\n".join(lines)
+    # Compute name column width
+    name_width = 0
+    if has_name:
+        name_width = len("Name")
+        for entry in entries:
+            val = len(entry.get("name", ""))
+            if val > name_width:
+                name_width = val
+        name_width = max(name_width, 4)
+
+    # Print header (attribute column header is blank)
+    hdr_cells: list[tuple[str, str]] = [("  ", "dim")]
+    for field in mid_fields:
+        label = field.replace("_", " ").title()
+        hdr_cells.append((label.ljust(col_widths[field]), "dim"))
+    if has_name:
+        hdr_cells.append(("Name".ljust(name_width), "dim"))
+    hdr_text = Text()
+    for i, (text, style) in enumerate(hdr_cells):
+        hdr_text.append(text, style=style)
+        if i < len(hdr_cells) - 1:
+            hdr_text.append(" ")
+    console.print(hdr_text)
+
+    # Format and print each entry
+    for entry in entries:
+        entry_type = entry.get("type", "file")
+        indicator = _get_type_indicator(entry_type)
+        access = _abbreviate_access(entry.get("access_level", ""))
+
+        cells: list[tuple[str, str | None]] = []
+        # attribute column (2 chars)
+        cells.append((f"{indicator}{access}", None))
+
+        # mid columns
+        for field in mid_fields:
+            val = _get_field(entry, field)
+            if not val:
+                val = "-"
+            # For directories with size 0, show "-" instead of "0"
+            if field == "size" and entry_type in ("directory", "container") and entry.get("size", 0) == 0:
+                val = "-"
+            cells.append((val.ljust(col_widths[field]), None))
+
+        # name (last, with color)
+        if has_name:
+            name = entry.get("name", "")
+            style = _get_file_color_style(name, entry_type)
+            cells.append((name.ljust(name_width), style if style else None))
+
+        line = Text()
+        for i, (text, style) in enumerate(cells):
+            line.append(text, style=style)
+            if i < len(cells) - 1:
+                line.append(" ")
+        console.print(line)
 
 
 def format_list_json(entries: list[dict[str, Any]], path: str) -> str:

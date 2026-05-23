@@ -69,17 +69,6 @@ def _sort_entries(
     return sorted(entries, key=lambda e: _sort_key(e, sort_by), reverse=reverse)
 
 
-def _show_progress(count: int, total: int | None) -> None:
-    """Show item count progress."""
-    if total is not None and total == 0 and count == 0:
-        return
-    suffix = f"/{total}" if total is not None else ""
-    msg = f"Items: {count}{suffix}"
-    if total is not None and count < total:
-        msg = f"\033[41m{msg}\033[0m"  # red background
-    print(msg, file=sys.stderr)
-
-
 def cmd_list(args: argparse.Namespace) -> int:
     """Handle the 'list' subcommand.
 
@@ -159,9 +148,6 @@ def cmd_list(args: argparse.Namespace) -> int:
                 entries = result["entries"]
                 total_count = result["total_count"]
 
-            # Show progress
-            _show_progress(len(entries), total_count if not recursive else None)
-
             # Apply client-side sort/filter if not done server-side
             # For recursive listing, per-directory sort is not enough - apply global sort
             if not use_gen4 or not file_id:
@@ -177,8 +163,9 @@ def cmd_list(args: argparse.Namespace) -> int:
                 elif sort_by and recursive:
                     entries = _sort_entries(entries, sort_by, reverse, False)
 
-            result = _format_list(entries, remote_path, output_format, fields)
-            print(result)
+            result = _format_list(entries, remote_path, output_format, fields, count=len(entries))
+            if result is not None:
+                print(result)
 
     except AsperaAuthError as e:
         print(f"Authentication error: {e}", file=sys.stderr)
@@ -305,9 +292,9 @@ def cmd_find(args: argparse.Namespace) -> int:
                 result = client.list_files(search_path, count=count)
                 entries = [e for e in result["entries"] if matcher(e)]
 
-            _show_progress(len(entries), None)
-            result = _format_list(entries, search_path, output_format, fields)
-            print(result)
+            result = _format_list(entries, search_path, output_format, fields, count=len(entries))
+            if result is not None:
+                print(result)
 
     except AsperaAuthError as e:
         print(f"Authentication error: {e}", file=sys.stderr)
@@ -327,8 +314,12 @@ def _format_list(
     path: str,
     fmt: str,
     fields: list[str] | None,
-) -> str:
-    """Format list entries according to the specified format."""
+    count: int | None = None,
+) -> str | None:
+    """Format list entries according to the specified format.
+
+    Returns a string for json/csv, or None for table (which prints directly).
+    """
     if not entries:
         return f"No files found at: {path}"
 
@@ -337,4 +328,5 @@ def _format_list(
     elif fmt == "csv":
         return format_list_csv(entries, path)
     else:
-        return format_list_table(entries, path, fields)
+        format_list_table(entries, path, fields, count=count)
+        return None
