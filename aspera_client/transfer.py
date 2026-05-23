@@ -347,6 +347,7 @@ def _build_ascp_command(
     http_fallback: bool = False,
     fallback_key: str | None = None,
     fallback_cert: str | None = None,
+    fallback_port: int = 443,
 ) -> tuple[list[str], dict[str, str]]:
     """Build the ascp command.
 
@@ -370,6 +371,7 @@ def _build_ascp_command(
         http_fallback: Enable HTTP fallback mode.
         fallback_key: Path to fallback private key file.
         fallback_cert: Path to fallback certificate file.
+        fallback_port: HTTP fallback server port (default: 443).
 
     Returns:
         Tuple of (ascp command args, environment variables).
@@ -425,14 +427,17 @@ def _build_ascp_command(
     if file_list:
         cmd.extend(["--file-list", file_list])
 
-    # 6. HTTP fallback key and certificate (ascp -Y and -I flags)
+    # 6. HTTP fallback (ascp -y 1, -Y, -I, -t flags)
     if http_fallback:
+        cmd.append("-y")
+        cmd.append("1")
         if fallback_key and os.path.exists(fallback_key):
             cmd.insert(2, fallback_key)
             cmd.insert(2, "-Y")
         if fallback_cert and os.path.exists(fallback_cert):
             cmd.insert(2, fallback_cert)
             cmd.insert(2, "-I")
+        cmd.extend(["-t", str(fallback_port)])
 
     # 6. SRC then DEST (ascp format: ascp [OPTION] SRC... DEST)
     if remote_path:
