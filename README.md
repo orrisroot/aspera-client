@@ -42,7 +42,6 @@ Options:
 
 The setup command creates:
 - `~/.aspera/connect/client/aspera_bypass_rsa.pem` — Bypass key for token authentication (used with `-i` flag)
-- `~/.aspera/connect/client/aspera_fallback_cert_private_key.pem` — Fallback private key for HTTP fallback (used with `-Y` flag)
 - `~/.aspera/connect/client/aspera_fallback_cert.pem` — Fallback certificate for HTTP fallback (used with `-I` flag)
 - `~/.aspera/connect/client/aspera.conf` — Aspera configuration file (copied from SDK)
 - `~/.aspera/connect/client/meta-data.xml` — SDK metadata
@@ -205,13 +204,14 @@ aspera download <remote_path>... <local_dest> [options]
   --gen4                  Use gen4 transfer spec
   --file-id FILE_ID       Gen4 file ID for transfer
   --retries N             Max retry attempts on transient failure (default: 3)
-  --timeout SECS          Transfer timeout in seconds (default: no timeout)
+  --timeout SECS          Transfer timeout in seconds (default: 120)
   --ascp-path PATH        Path to ascp binary (overrides auto-detection)
+  --verbose               Enable verbose ascp output (-m flag)
 ```
 
-**Retry behavior:** Transfers are automatically retried on transient failures (network errors, token expiry, FASP handshake issues) with exponential backoff. Non-retryable errors (authentication, permission denied, disk full) fail immediately.
+**Retry behavior:** Transfers are automatically retried on transient failures (network errors, token expiry, FASP handshake issues) with exponential backoff. Non-retryable errors (authentication, permission denied, disk full) fail immediately. The default transfer timeout is 120 seconds (override with `--timeout`).
 
-**Automatic key application:** After running `setup`, the bypass key and fallback keys are automatically detected and applied to download commands. The bypass key is used for token authentication, and fallback keys enable HTTP fallback transfer.
+**Automatic key application:** After running `setup`, the bypass key and fallback certificate are automatically detected and applied to download commands. The bypass key is used for token authentication, and the fallback certificate enables HTTP fallback transfer (via `-I` and `-y 1` flags). The fallback port is taken from the API response (`https_fallback_port`) or defaults to 443.
 
 ## Authentication
 
@@ -236,7 +236,12 @@ After running `aspera setup`, the bypass key (`~/.aspera/connect/client/aspera_b
 
 ### HTTP Fallback
 
-When the primary FASP transfer fails, the client automatically falls back to HTTP transfer using the fallback key and certificate stored in `~/.aspera/connect/client/`.
+When the primary FASP transfer fails, the client automatically falls back to HTTP transfer. The fallback is enabled via ascp's `-y 1` flag, using the fallback certificate (`-I`) and port (`-t`, default 443). The server's `https_fallback` and `https_fallback_port` fields from the API response are respected when available.
+
+**Fallback behavior:**
+- If the FASP port is closed but the host responds, fallback triggers in ~2 seconds
+- If the host is unreachable, the transfer times out after `--timeout` seconds (default: 120s) and retries (default: 3 times)
+- Use `--verbose` for detailed ascp output, or check the log messages showing fallback status
 
 ## API Support
 

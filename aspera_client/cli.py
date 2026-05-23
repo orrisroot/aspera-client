@@ -251,6 +251,11 @@ def main() -> None:
         "--ascp-path",
         help="Path to ascp binary (overrides auto-detection)",
     )
+    download_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose ascp output (-m flag)",
+    )
 
     # setup subcommand
     setup_parser = subparsers.add_parser("setup", help="Install SDK and generate keys")

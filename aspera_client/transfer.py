@@ -74,6 +74,9 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF = 2.0
 DEFAULT_RETRY_JITTER = 0.5
 
+# Default transfer timeout in seconds (2 minutes — keeps unreachable-host hangs bounded)
+DEFAULT_TRANSFER_TIMEOUT = 120
+
 # ascp exit code descriptions
 ASCP_EXIT_CODES: dict[int, str] = {
     0: "Success",
@@ -340,6 +343,7 @@ def _build_ascp_command(
     resume: bool = False,
     multi_session: int = 1,
     quiet: bool = False,
+    verbose: bool = False,
     file_list: str | None = None,
     ssh_private_key: str | None = None,
     resume_policy: str = "sparse_csum",
@@ -347,7 +351,7 @@ def _build_ascp_command(
     http_fallback: bool = False,
     fallback_key: str | None = None,
     fallback_cert: str | None = None,
-    fallback_port: int = 443,
+    fallback_port: int | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Build the ascp command.
 
@@ -371,7 +375,7 @@ def _build_ascp_command(
         http_fallback: Enable HTTP fallback mode.
         fallback_key: Path to fallback private key file.
         fallback_cert: Path to fallback certificate file.
-        fallback_port: HTTP fallback server port (default: 443).
+        fallback_port: HTTP fallback server port (default: 443, None=auto).
 
     Returns:
         Tuple of (ascp command args, environment variables).
@@ -385,6 +389,10 @@ def _build_ascp_command(
     # 1. Quiet mode (suppresses native progress bar; we handle progress ourselves)
     if quiet:
         cmd.append("-q")
+
+    # Verbose mode (enables detailed ascp output)
+    if verbose:
+        cmd.append("-m")
 
     # 2. Transfer spec parameters (token, ports)
     if multi_session > 1:
@@ -427,17 +435,17 @@ def _build_ascp_command(
     if file_list:
         cmd.extend(["--file-list", file_list])
 
-    # 6. HTTP fallback (ascp -y 1, -Y, -I, -t flags)
+    # 6. HTTP fallback (ascp -y, -I, -t flags)
+    # Note: -y 1 enables HTTP fallback (binary toggle, not a timeout)
+    # -Y does NOT exist in ascp — the fallback private key is not used by ascp
     if http_fallback:
         cmd.append("-y")
         cmd.append("1")
-        if fallback_key and os.path.exists(fallback_key):
-            cmd.insert(2, fallback_key)
-            cmd.insert(2, "-Y")
         if fallback_cert and os.path.exists(fallback_cert):
             cmd.insert(2, fallback_cert)
             cmd.insert(2, "-I")
-        cmd.extend(["-t", str(fallback_port)])
+        port = fallback_port if fallback_port is not None else 443
+        cmd.extend(["-t", str(port)])
 
     # 6. SRC then DEST (ascp format: ascp [OPTION] SRC... DEST)
     if remote_path:
@@ -474,6 +482,7 @@ def download_with_progress(
     resume: bool = False,
     multi_session: int = 1,
     quiet: bool = False,
+    verbose: bool = False,
     ssh_private_key: str | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
     transfer_timeout: int | None = None,
@@ -533,6 +542,11 @@ def download_with_progress(
         )
     resume_policy = spec.get("resume_policy", "sparse_csum")
 
+    # Check https_fallback from API response
+    api_https_fallback = token_data.get("https_fallback", spec.get("https_fallback"))
+    api_fallback_port = token_data.get("https_fallback_port", spec.get("https_fallback_port"))
+    api_fallback_url = token_data.get("https_fallback_url", spec.get("https_fallback_url"))
+
     # Get remote paths from the response
     source_root = spec.get("source_root", "")
     paths = spec.get("paths", [])
@@ -541,6 +555,19 @@ def download_with_progress(
 
     # Build ascp command
     if (remote_path and remote_host) or file_list_path:
+        # Determine effective fallback settings: API response takes precedence
+        effective_fallback = api_https_fallback if api_https_fallback is not None else http_fallback
+        effective_fallback_port = api_fallback_port if api_fallback_port else None
+
+        if effective_fallback and effective_fallback_port:
+            print(f"  HTTP fallback enabled (port: {effective_fallback_port})", file=sys.stderr)
+        elif effective_fallback:
+            print("  HTTP fallback enabled", file=sys.stderr)
+        else:
+            print("  HTTP fallback disabled (not supported by server or keys unavailable)", file=sys.stderr)
+        if api_fallback_url:
+            print(f"  Fallback URL: {api_fallback_url}", file=sys.stderr)
+
         cmd, env = _build_ascp_command(
             token=token,
             remote_host=remote_host,
@@ -552,14 +579,32 @@ def download_with_progress(
             resume=resume,
             multi_session=multi_session,
             quiet=quiet,
+            verbose=verbose,
             file_list=file_list_path,
             ssh_private_key=ssh_private_key,
             resume_policy=resume_policy,
             bypass_key=bypass_key,
-            http_fallback=http_fallback,
+            http_fallback=effective_fallback,
             fallback_key=fallback_key,
             fallback_cert=fallback_cert,
+            fallback_port=effective_fallback_port,
         )
+
+        # Log final ascp command with fallback flags (redacted token)
+        redacted_cmd = []
+        for i, part in enumerate(cmd):
+            if i > 0 and cmd[i - 1] == "-W":
+                redacted_cmd.append("***")
+            else:
+                redacted_cmd.append(part)
+        print(f"  Final ascp command: {' '.join(redacted_cmd)}", file=sys.stderr)
+        if effective_fallback:
+            has_fallback_cert = fallback_cert and os.path.exists(fallback_cert)
+            print(
+                f"  Fallback enabled (cert={'yes' if has_fallback_cert else 'no'}, "
+                f"port={effective_fallback_port or 443})",
+                file=sys.stderr,
+            )
     else:
         raise RuntimeError(
             "Could not build ascp command. "
@@ -570,13 +615,6 @@ def download_with_progress(
     os.makedirs(local_dest, exist_ok=True)
 
     print("Starting Aspera transfer...", file=sys.stderr)
-    redacted_cmd = []
-    for i, part in enumerate(cmd):
-        if i > 0 and cmd[i - 1] == "-W":
-            redacted_cmd.append("***")
-        else:
-            redacted_cmd.append(part)
-    print(f"  Command: {' '.join(redacted_cmd)}", file=sys.stderr)
     if env:
         print(f"  Environment: {dict((k, '***' if k in ('ASPERA_SCP_TOKEN', 'ASPERA_SCP_SSH_PRIVATE_KEY') else v) for k, v in env.items())}", file=sys.stderr)
     print(file=sys.stderr)
@@ -598,6 +636,12 @@ def download_with_progress(
     else:
         error_msg = get_ascp_error_message(return_code)
         print(f"\nTransfer failed with exit code {return_code}: {error_msg}")
+        if effective_fallback:
+            print(
+                "  Fallback was enabled. If FASP failed, check HTTP fallback connectivity "
+                f"(port {effective_fallback_port or 443}).",
+                file=sys.stderr,
+            )
 
     return return_code
 

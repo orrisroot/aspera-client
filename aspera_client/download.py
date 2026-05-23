@@ -16,6 +16,7 @@ from .formatter import format_download_result
 from .node_api import AsperaAuthError, AsperaApiError, AsperaNodeClient
 from .transfer import (
     DIRECTION_RECEIVE,
+    DEFAULT_TRANSFER_TIMEOUT,
     _build_ascp_command,
     _execute_ascp,
     build_file_list,
@@ -61,8 +62,9 @@ def cmd_download(args: argparse.Namespace) -> int:
     use_gen4 = args.gen4
     file_id = getattr(args, "file_id", None)
     max_retries = getattr(args, "retries", 3)
-    transfer_timeout = getattr(args, "timeout", None)
+    transfer_timeout = getattr(args, "timeout", DEFAULT_TRANSFER_TIMEOUT)
     ascp_path_override = getattr(args, "ascp_path", None)
+    verbose = getattr(args, "verbose", False)
 
     if ascp_path_override:
         os.environ["ASPERA_ASCP"] = ascp_path_override
@@ -128,6 +130,10 @@ def cmd_download(args: argparse.Namespace) -> int:
 
                 # Gen4 transfer (handles all paths at once)
                 if use_gen4 and file_id:
+                    fallback_enabled = (
+                        get_fallback_key_path() is not None
+                        and get_fallback_cert_path() is not None
+                    )
                     return_code = _download_gen4(
                         client=client,
                         file_id=file_id,
@@ -138,6 +144,7 @@ def cmd_download(args: argparse.Namespace) -> int:
                         quiet=quiet,
                         max_retries=max_retries,
                         transfer_timeout=transfer_timeout,
+                        https_fallback=fallback_enabled,
                     )
                     elapsed = time.time() - total_start
                     status = "success" if return_code == 0 else "failed"
@@ -159,7 +166,20 @@ def cmd_download(args: argparse.Namespace) -> int:
                     local_dest=local_dest,
                 )
 
+                # Log fallback info from API response
+                api_https_fallback = token_data.get("https_fallback")
+                api_fallback_port = token_data.get("https_fallback_port")
+                api_fallback_url = token_data.get("https_fallback_url")
+                fallback_key_path = get_fallback_key_path()
+                fallback_cert_path = get_fallback_cert_path()
+
                 print("Token received. Starting transfer...", file=sys.stderr)
+                print(f"  https_fallback (API): {api_https_fallback}", file=sys.stderr)
+                print(f"  https_fallback_port (API): {api_fallback_port}", file=sys.stderr)
+                if api_fallback_url:
+                    print(f"  https_fallback_url (API): {api_fallback_url}", file=sys.stderr)
+                print(f"  fallback_key available: {fallback_key_path is not None}", file=sys.stderr)
+                print(f"  fallback_cert available: {fallback_cert_path is not None}", file=sys.stderr)
                 print(file=sys.stderr)
 
                 start_time = time.time()
@@ -170,6 +190,7 @@ def cmd_download(args: argparse.Namespace) -> int:
                         resume=resume,
                         multi_session=multi_session,
                         max_retries=max_retries,
+                        transfer_timeout=transfer_timeout,
                     )
                 else:
                     spec = extract_spec(token_data)
@@ -179,6 +200,7 @@ def cmd_download(args: argparse.Namespace) -> int:
                         resume=resume,
                         multi_session=multi_session,
                         quiet=quiet,
+                        verbose=verbose,
                         ssh_private_key=spec.get("ssh_private_key"),
                         bypass_key=get_bypass_key_path(),
                         http_fallback=True,
@@ -257,6 +279,8 @@ def _download_gen4(
     quiet: bool = False,
     max_retries: int = 3,
     transfer_timeout: int | None = None,
+    https_fallback: bool = False,
+    fallback_port: int | None = None,
 ) -> int:
     """Execute gen4 download transfer.
 
@@ -333,6 +357,8 @@ def _download_gen4(
         resume=resume,
         max_retries=max_retries,
         transfer_timeout=transfer_timeout,
+        https_fallback=https_fallback,
+        fallback_port=fallback_port,
     )
 
 
@@ -344,6 +370,8 @@ def _execute_transfer_spec(
     resume: bool = False,
     max_retries: int = 3,
     transfer_timeout: int | None = None,
+    https_fallback: bool = True,
+    fallback_port: int | None = None,
 ) -> int:
     """Execute ascp from a transfer spec dict.
 
@@ -389,9 +417,10 @@ def _execute_transfer_spec(
         resume=resume,
         resume_policy=resume_policy,
         bypass_key=get_bypass_key_path(),
-        http_fallback=True,
+        http_fallback=https_fallback,
         fallback_key=get_fallback_key_path(),
         fallback_cert=get_fallback_cert_path(),
+        fallback_port=fallback_port,
     )
 
     os.makedirs(local_dest, exist_ok=True)
@@ -412,6 +441,7 @@ def _download_with_output_redirect(
     resume: bool = False,
     multi_session: int = 1,
     max_retries: int = 3,
+    transfer_timeout: int | None = None,
 ) -> int:
     """Execute download, redirecting stdout/stderr to stderr for clean JSON stdout."""
 
@@ -434,6 +464,12 @@ def _download_with_output_redirect(
     if (not remote_path and not file_list_path) or not remote_host:
         raise RuntimeError("Could not build ascp command. API response missing required transfer specs.")
 
+    # Check fallback from API response
+    api_fallback_port = token_data.get("https_fallback_port", spec.get("https_fallback_port"))
+    fallback_enabled = (
+        get_fallback_key_path() is not None
+        and get_fallback_cert_path() is not None
+    )
     cmd, env = _build_ascp_command(
         token=token,
         remote_host=remote_host,
@@ -448,9 +484,10 @@ def _download_with_output_redirect(
         multi_session=multi_session,
         quiet=True,
         bypass_key=get_bypass_key_path(),
-        http_fallback=True,
+        http_fallback=fallback_enabled,
         fallback_key=get_fallback_key_path(),
         fallback_cert=get_fallback_cert_path(),
+        fallback_port=api_fallback_port,
     )
 
     os.makedirs(local_dest, exist_ok=True)
@@ -462,4 +499,5 @@ def _download_with_output_redirect(
         quiet=True,
         redirect_stdout=True,
         max_retries=max_retries,
+        transfer_timeout=transfer_timeout,
     )

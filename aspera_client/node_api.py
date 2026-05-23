@@ -767,6 +767,15 @@ class AsperaNodeClient:
             transfer_specs[0]["transfer_spec"] = updated_spec
             data["transfer_specs"] = transfer_specs
 
+            # Extract https_fallback info from API response
+            # The API may return https_fallback (bool), https_fallback_port (int), https_fallback_url (str)
+            if "https_fallback" not in data:
+                data["https_fallback"] = spec.get("https_fallback", False)
+            if "https_fallback_port" not in data:
+                data["https_fallback_port"] = spec.get("https_fallback_port")
+            if "https_fallback_url" not in data:
+                data["https_fallback_url"] = spec.get("https_fallback_url")
+
         return data
 
     # -------------------------------------------------------------------------
