@@ -3,27 +3,27 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-import urllib.parse
-import yaml
+from ..models.config import (
+    load_config as _load_config,
+    resolve_host_port as _resolve_host_port,
+)
 
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
-    if not os.path.exists(config_path):
+    try:
+        return _load_config(config_path)
+    except FileNotFoundError:
         print(f"Error: Configuration file not found: {config_path}", file=sys.stderr)
-        print(f"Please copy config.sample.yaml to {config_path} and edit it.", file=sys.stderr)
+        print(
+            f"Please copy config.sample.yaml to {config_path} and edit it.",
+            file=sys.stderr,
+        )
         sys.exit(1)
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-
-    if not config:
+    except ValueError:
         print(f"Error: Configuration file is empty: {config_path}", file=sys.stderr)
         sys.exit(1)
-
-    return config
 
 
 def resolve_host_port(args: argparse.Namespace, config: dict) -> tuple[str, int]:
@@ -31,38 +31,11 @@ def resolve_host_port(args: argparse.Namespace, config: dict) -> tuple[str, int]
 
     Priority: --url flag > config url > --host/--port flags > config host/port > defaults.
     """
-    url = args.url or config.get("url")
-    if url:
-        parsed = urllib.parse.urlparse(url)
-        host = parsed.hostname or "localhost"
-        port = parsed.port or 9092
-        return host, port
-
-    host = getattr(args, "host", None) or config.get("host", "localhost")
-    port = getattr(args, "port", None) if getattr(args, "port", None) is not None else config.get("port", 9092)
-    return host, int(port)
-
-
-def cmd_setup(args: argparse.Namespace) -> int:
-    """Handle the 'setup' subcommand.
-
-    Args:
-        args: Parsed command-line arguments.
-
-    Returns:
-        Exit code.
-    """
-    from .setup import setup_complete
-
-    results = setup_complete(
-        install_sdk_flag=not args.no_sdk,
-        bypass_key_flag=not args.no_bypass_key,
-        fallback_key_flag=not args.no_fallback_key,
-        version=getattr(args, "version", None),
+    host_flag = getattr(args, "host", None)
+    port_flag = getattr(args, "port", None)
+    return _resolve_host_port(
+        url=args.url, host=host_flag, port=port_flag, config=config
     )
-
-    has_errors = any(k.endswith("_error") for k in results)
-    return 1 if has_errors else 0
 
 
 def main() -> None:
@@ -72,11 +45,15 @@ def main() -> None:
         description="IBM Aspera Node API client for file listing and high-speed transfer",
     )
     parser.add_argument(
-        "-c", "--config",
+        "-c",
+        "--config",
         default="config.yaml",
         help="Path to configuration file (default: config.yaml)",
     )
-    parser.add_argument("--url", help="Aspera Node server URL (overrides config, e.g. https://host:9092)")
+    parser.add_argument(
+        "--url",
+        help="Aspera Node server URL (overrides config, e.g. https://host:9092)",
+    )
     parser.add_argument("--user", help="Username (overrides config)")
     parser.add_argument("--password", help="Password (overrides config)")
 
@@ -91,13 +68,15 @@ def main() -> None:
         help="Remote directory path (default: /)",
     )
     list_parser.add_argument(
-        "-n", "--count",
+        "-n",
+        "--count",
         type=int,
         default=1000,
         help="Max entries per page (default: 1000)",
     )
     list_parser.add_argument(
-        "-r", "--recursive",
+        "-r",
+        "--recursive",
         action="store_true",
         help="Recursively list subdirectories",
     )
@@ -123,7 +102,8 @@ def main() -> None:
         help="Filter by type",
     )
     list_parser.add_argument(
-        "-f", "--format",
+        "-f",
+        "--format",
         choices=["table", "json", "csv"],
         default="table",
         help="Output format (default: table)",
@@ -159,18 +139,21 @@ def main() -> None:
         help="Glob pattern, regex, or field=value to match (e.g., '*.txt', 'size>1000')",
     )
     find_parser.add_argument(
-        "-r", "--recursive",
+        "-r",
+        "--recursive",
         action="store_true",
         help="Recursively search subdirectories",
     )
     find_parser.add_argument(
-        "-n", "--count",
+        "-n",
+        "--count",
         type=int,
         default=1000,
         help="Max entries per page (default: 1000)",
     )
     find_parser.add_argument(
-        "-f", "--format",
+        "-f",
+        "--format",
         choices=["table", "json", "csv"],
         default="table",
         help="Output format (default: table)",
@@ -189,7 +172,9 @@ def main() -> None:
         help="Gen4 file ID to search from",
     )
     # download subcommand
-    download_parser = subparsers.add_parser("download", help="Download files using ascp")
+    download_parser = subparsers.add_parser(
+        "download", help="Download files using ascp"
+    )
     download_parser.add_argument(
         "remote_path",
         nargs="+",
@@ -210,18 +195,21 @@ def main() -> None:
         help="Resume interrupted transfer",
     )
     download_parser.add_argument(
-        "-f", "--format",
+        "-f",
+        "--format",
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
     )
     download_parser.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
         help="Suppress ascp progress bar output",
     )
     download_parser.add_argument(
-        "-M", "--multi-session",
+        "-M",
+        "--multi-session",
         type=int,
         default=1,
         help="Number of concurrent transfer sessions (default: 1)",
@@ -281,7 +269,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "download" and hasattr(args, "multi_session") and args.multi_session < 1:
+    if (
+        args.command == "download"
+        and hasattr(args, "multi_session")
+        and args.multi_session < 1
+    ):
         parser.error("--multi-session must be >= 1")
 
     if not args.command:
@@ -289,15 +281,20 @@ def main() -> None:
         sys.exit(1)
 
     if args.command == "list":
-        from .list import cmd_list
+        from .cmd_list import cmd_list
+
         exit_code = cmd_list(args)
     elif args.command == "find":
-        from .list import cmd_find
+        from .cmd_list import cmd_find
+
         exit_code = cmd_find(args)
     elif args.command == "download":
-        from .download import cmd_download
+        from .cmd_download import cmd_download
+
         exit_code = cmd_download(args)
     elif args.command == "setup":
+        from .cmd_setup import cmd_setup
+
         exit_code = cmd_setup(args)
     else:
         parser.print_help()

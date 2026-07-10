@@ -12,7 +12,7 @@ A CLI tool for IBM Aspera Node API. Supports file listing, searching, and high-s
 2. `~/.aspera/connect/bin/ascp` (default install location)
 3. System `PATH`
 
-**Setup command:** Run `aspera setup` to install the Aspera Connect SDK and generate required authentication keys (bypass key for token auth, fallback key for HTTP fallback). Keys are stored in `~/.aspera/connect/` and automatically applied to download commands. The bypass key is bundled as a DER file in `aspera_client/data/bypass_rsa.der`.
+**Setup command:** Run `aspera setup` (or call `setup_environment()` in Python) to install the Aspera Connect SDK and generate required authentication keys (bypass key for token auth, fallback key for HTTP fallback). Keys are stored in `~/.aspera/connect/` (or your custom `AsperaEnvironment.base_dir`) and automatically applied to download commands. The bypass key is bundled as a DER file in `aspera_client/data/bypass_rsa.der`.
 
 ## Installation
 
@@ -49,6 +49,10 @@ The setup command creates:
 Generated files are stored in `~/.aspera/connect/client/` to keep them separate from SDK files.
 
 Keys are automatically applied to `download` commands.
+
+## Python Library Usage
+
+This package can also be used as a Python library. For detailed Python API references, modular package architecture, and script integration examples, please refer to [API_REFERENCE.md](./API_REFERENCE.md).
 
 ## Configuration
 

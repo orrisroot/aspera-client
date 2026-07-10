@@ -109,9 +109,25 @@ def _compute_fields(
 # File type extensions for LS_COLORS-like coloring
 _COMPRESS_EXTS = {".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz", ".tbz2"}
 _MEDIA_EXTS = {
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico",
-    ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv",
-    ".mp3", ".wav", ".flac", ".aac", ".ogg",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".bmp",
+    ".svg",
+    ".webp",
+    ".ico",
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".aac",
+    ".ogg",
 }
 
 LS_DEFAULT_FIELDS = ("size", "modified", "name")
@@ -262,7 +278,11 @@ def _print_ls_style(
             if not val:
                 val = "-"
             # For directories with size 0, show "-" instead of "0"
-            if field == "size" and entry_type in ("directory", "container") and entry.get("size", 0) == 0:
+            if (
+                field == "size"
+                and entry_type in ("directory", "container")
+                and entry.get("size", 0) == 0
+            ):
                 val = "-"
             cells.append((val.ljust(col_widths[field]), None))
 
@@ -295,9 +315,7 @@ def format_list_csv(entries: list[dict[str, Any]], path: str) -> str:
     if not entries:
         return ""
 
-    fieldnames = sorted(
-        {k for entry_data in entries for k in entry_data.keys()}
-    )
+    fieldnames = sorted({k for entry_data in entries for k in entry_data.keys()})
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames)
     writer.writeheader()

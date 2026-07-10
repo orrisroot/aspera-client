@@ -11,8 +11,13 @@ from typing import Any, Callable
 
 import requests
 
+from ..models.config import AsperaConfig
+from ..models.environment import AsperaEnvironment
+from .exceptions import AsperaAuthError, AsperaApiError
+
 try:
     import cryptography  # noqa: F401
+
     HAS_CRYPTO = True
 except ImportError:
     HAS_CRYPTO = False
@@ -32,24 +37,14 @@ FOLDER_TYPES = ("folder", "directory", "container")
 DEFAULT_GEN4_PER_PAGE = 1000
 
 
-class AsperaNodeError(Exception):
-    """Base exception for Aspera Node API errors."""
-
-
-class AsperaAuthError(AsperaNodeError):
-    """Authentication failed."""
-
-
-class AsperaApiError(AsperaNodeError):
-    """API returned an error response."""
-
-
 def gen3_entry_folder(entry: dict[str, Any]) -> bool:
     """Check if a gen3 entry is a folder."""
     return entry.get("type", "") in FOLDER_TYPES
 
 
-def file_matcher(match_expression: str | object | None = None) -> Callable[[dict[str, Any]], bool]:
+def file_matcher(
+    match_expression: str | object | None = None,
+) -> Callable[[dict[str, Any]], bool]:
     """Create a file matcher function from an expression.
 
     Create a file matcher function.
@@ -64,6 +59,7 @@ def file_matcher(match_expression: str | object | None = None) -> Callable[[dict
         return lambda _: True
     if isinstance(match_expression, str):
         import fnmatch
+
         return lambda f: fnmatch.fnmatch(f.get("name", ""), match_expression)
     if hasattr(match_expression, "pattern"):  # regex
         return lambda f: bool(match_expression.search(f.get("name", "")))
@@ -72,8 +68,8 @@ def file_matcher(match_expression: str | object | None = None) -> Callable[[dict
     raise TypeError(f"Unsupported match expression type: {type(match_expression)}")
 
 
-class AsperaNodeClient:
-    """Client for IBM Aspera Node API REST endpoints.
+class AsperaConnection:
+    """Connection session for IBM Aspera Node API REST endpoints.
 
     Supports both gen3 (POST /files/browse) and gen4 (GET /files/:id/files
     with Accept-Version: 4.0 and iteration_token pagination).
@@ -81,7 +77,7 @@ class AsperaNodeClient:
 
     def __init__(
         self,
-        host: str,
+        host: str | AsperaConfig | None = None,
         port: int = 9092,
         user: str | None = None,
         password: str | None = None,
@@ -89,11 +85,13 @@ class AsperaNodeClient:
         timeout: int = 30,
         dynamic_key: str | None = None,
         accept_v4: bool = True,
+        config: AsperaConfig | None = None,
+        env: AsperaEnvironment | None = None,
     ) -> None:
         """Initialize the client.
 
         Args:
-            host: Aspera Node server hostname or IP.
+            host: Aspera Node server hostname or IP, or an AsperaConfig instance.
             port: Node API port (default 9092).
             user: Username for Basic authentication.
             password: Password for Basic authentication.
@@ -101,26 +99,59 @@ class AsperaNodeClient:
             timeout: Request timeout in seconds (default 30).
             dynamic_key: PEM-encoded RSA private key for dynamic key authentication.
             accept_v4: Whether to use gen4 API features (Accept-Version: 4.0).
+            config: An AsperaConfig instance.
+            env: An AsperaEnvironment instance.
         """
-        self.timeout = timeout
-        self.user = user
-        self.password = password
-        self.verify_ssl = verify_ssl
+        self.env = env or AsperaEnvironment()
+
+        cfg = config
+        if cfg is None and isinstance(host, AsperaConfig):
+            cfg = host
+
+        if cfg is not None:
+            host_val = cfg.host
+            port_val = cfg.port
+            user_val = cfg.user
+            password_val = cfg.password
+            verify_ssl_val = cfg.verify_ssl
+            timeout_val = cfg.timeout
+            dynamic_key_val = cfg.dynamic_key
+            accept_v4_val = cfg.accept_v4
+        else:
+            host_val = host or "localhost"
+            port_val = port
+            user_val = user
+            password_val = password
+            verify_ssl_val = verify_ssl
+            timeout_val = timeout
+            dynamic_key_val = dynamic_key
+            accept_v4_val = accept_v4
+
+        self.timeout = timeout_val
+        self.user = user_val
+        self.password = password_val
+        self.verify_ssl = verify_ssl_val
         self._session = requests.Session()
-        self._session.auth = (self.user, self.password) if self.user and self.password else None
+        self._session.auth = (
+            (self.user, self.password) if self.user and self.password else None
+        )
         self._session.headers.update({"Accept": "application/json"})
-        self._dynamic_key = dynamic_key
+        self._dynamic_key = dynamic_key_val
 
         # Set base_url without prefix first for auto-detection
-        base_no_prefix = urllib.parse.urlunsplit(("https", f"{host}:{port}", "", "", ""))
+        base_no_prefix = urllib.parse.urlunsplit(
+            ("https", f"{host_val}:{port_val}", "", "", "")
+        )
         self.base_url = base_no_prefix.rstrip("/")
 
         prefix = self._auto_detect_prefix()
-        base = urllib.parse.urlunsplit(("https", f"{host}:{port}", prefix, "", ""))
+        base = urllib.parse.urlunsplit(
+            ("https", f"{host_val}:{port_val}", prefix, "", "")
+        )
         self.base_url = base.rstrip("/")
         self._cached_public_key: str | None = None
         self._cached_public_key_pem: str | None = None
-        self._accept_v4 = accept_v4
+        self._accept_v4 = accept_v4_val
         self._app_info: dict[str, Any] | None = None
         self._add_tspec: dict[str, Any] | None = None
         self._std_tspec_cache: dict[str, Any] | None = None
@@ -220,7 +251,9 @@ class AsperaNodeClient:
     _ssh_public_key_cache: dict[str, str] = {}
 
     @classmethod
-    def add_public_key_to_spec(cls, spec: dict[str, Any], dynamic_key: str | None) -> dict[str, Any]:
+    def add_public_key_to_spec(
+        cls, spec: dict[str, Any], dynamic_key: str | None
+    ) -> dict[str, Any]:
         """Add public key to transfer spec (dynamic key auth).
 
         Add public key to transfer spec (dynamic key auth).
@@ -238,7 +271,9 @@ class AsperaNodeClient:
         return spec
 
     @classmethod
-    def add_private_key_to_spec(cls, spec: dict[str, Any], dynamic_key: str | None) -> dict[str, Any]:
+    def add_private_key_to_spec(
+        cls, spec: dict[str, Any], dynamic_key: str | None
+    ) -> dict[str, Any]:
         """Add private key to transfer spec (dynamic key auth).
 
         Add private key to transfer spec (dynamic key auth).
@@ -265,8 +300,8 @@ class AsperaNodeClient:
         if not self._dynamic_key:
             return
         if self._cached_public_key is None:
-            self._cached_public_key, self._cached_public_key_pem = _generate_ssh_public_key_from_pem(
-                self._dynamic_key
+            self._cached_public_key, self._cached_public_key_pem = (
+                _generate_ssh_public_key_from_pem(self._dynamic_key)
             )
         payload.setdefault("public_keys", self._cached_public_key)
 
@@ -311,13 +346,21 @@ class AsperaNodeClient:
         """GET /info - Get node information."""
         return self._request("GET", "/info")
 
-    def read(self, subpath: str, query: dict[str, Any] | None = None,
-             headers: dict[str, str] | None = None) -> Any:
+    def read(
+        self,
+        subpath: str,
+        query: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         """Generic GET request."""
         return self._request("GET", subpath, headers=headers, params=query)
 
-    def create(self, subpath: str, json_data: dict[str, Any] | None = None,
-               headers: dict[str, str] | None = None) -> Any:
+    def create(
+        self,
+        subpath: str,
+        json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         """Generic POST request."""
         return self._request("POST", subpath, json_data=json_data, headers=headers)
 
@@ -333,7 +376,9 @@ class AsperaNodeClient:
         """Generic POST cancel request."""
         return self._request("POST", subpath)
 
-    def add_cache_control(self, headers: dict[str, str] | None = None) -> dict[str, str]:
+    def add_cache_control(
+        self, headers: dict[str, str] | None = None
+    ) -> dict[str, str]:
         """Add cache control header for no-cache."""
         if headers is None:
             headers = {}
@@ -352,10 +397,11 @@ class AsperaNodeClient:
         sort_by: str | None = None,
         reverse: bool = False,
         type_filter: str | None = None,
+        all_pages: bool = True,
     ) -> dict[str, Any]:
         """List files and directories in a remote path (gen3).
 
-        Uses the POST /files/browse endpoint with automatic skip-based pagination.
+        Uses the POST /files/browse endpoint with skip-based pagination.
         sort_by and type_filter are applied as client-side post-processing
         (server-side sorting/filtering is not available for gen3).
 
@@ -366,9 +412,10 @@ class AsperaNodeClient:
             sort_by: Sort field (name, size, modified, type) - client-side.
             reverse: Reverse sort order - client-side.
             type_filter: Filter by type (file, directory, symbolic_link) - client-side.
+            all_pages: If True, automatically fetch all remaining pages. If False, fetch one page.
 
         Returns:
-            Dict with 'entries' (list) and 'total_count' (int).
+            Dict with 'entries' (list), 'total_count' (int), and optionally 'next_skip' (int).
         """
         all_entries: list[dict[str, Any]] = []
         total_count: int | None = None
@@ -376,7 +423,8 @@ class AsperaNodeClient:
 
         while True:
             data = self._request(
-                "POST", "/files/browse",
+                "POST",
+                "/files/browse",
                 json_data={"path": path, "count": count, "skip": current_skip},
             )
 
@@ -385,10 +433,33 @@ class AsperaNodeClient:
 
             entries = self._parse_gen3_items(items, path)
 
-            if total_count is not None and len(all_entries) + len(entries) > total_count:
+            if (
+                total_count is not None
+                and len(all_entries) + len(entries) > total_count
+            ):
                 entries = entries[: total_count - len(all_entries)]
 
             all_entries.extend(entries)
+
+            if not all_pages:
+                next_skip = None
+                if len(entries) >= count and (
+                    total_count is None or current_skip + count < total_count
+                ):
+                    next_skip = current_skip + count
+                result = {
+                    "entries": all_entries,
+                    "total_count": total_count or len(all_entries),
+                    "next_skip": next_skip,
+                }
+                if sort_by or type_filter:
+                    result["entries"] = self._apply_server_sort_filter(
+                        result["entries"],
+                        sort_by,
+                        reverse,
+                        type_filter,
+                    )
+                return result
 
             if len(entries) < count:
                 break
@@ -397,12 +468,18 @@ class AsperaNodeClient:
 
             current_skip += count
 
-        result = {"entries": all_entries, "total_count": total_count or len(all_entries)}
+        result = {
+            "entries": all_entries,
+            "total_count": total_count or len(all_entries),
+        }
 
         # Apply server-side sort/filter if requested
         if sort_by or type_filter:
             result["entries"] = self._apply_server_sort_filter(
-                result["entries"], sort_by, reverse, type_filter,
+                result["entries"],
+                sort_by,
+                reverse,
+                type_filter,
             )
 
         return result
@@ -418,7 +495,8 @@ class AsperaNodeClient:
         iteration_token: str | None = None,
         sort: str | None = None,
         include: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+        all_pages: bool = True,
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         """List files in a folder using gen4 API.
 
         Uses GET /files/{file_id}/files with Accept-Version: 4.0 and
@@ -430,16 +508,19 @@ class AsperaNodeClient:
             iteration_token: Token for pagination continuation.
             sort: Sort specification (e.g., "name asc").
             include: Fields to include.
+            all_pages: If True, automatically fetch all remaining pages. If False, fetch one page.
 
         Returns:
-            List of file/folder entries.
+            List of file/folder entries if all_pages is True, or dict with 'items' (list)
+            and optionally 'next_iteration_token' (str) if all_pages is False.
         """
         headers = self.add_cache_control()
         headers[HEADER_ACCEPT_VERSION] = "4.0"
 
         query: dict[str, Any] = {"per_page": per_page}
-        if iteration_token:
-            query["iteration_token"] = iteration_token
+        current_token = iteration_token
+        if current_token:
+            query["iteration_token"] = current_token
         if sort:
             query["sort"] = sort
         if include:
@@ -449,8 +530,11 @@ class AsperaNodeClient:
 
         while True:
             data, response = self._request(
-                "GET", f"/files/{file_id}/files",
-                headers=headers, params=query, return_response=True,
+                "GET",
+                f"/files/{file_id}/files",
+                headers=headers,
+                params=query,
+                return_response=True,
             )
 
             if not isinstance(data, list):
@@ -459,12 +543,20 @@ class AsperaNodeClient:
             all_items.extend(data)
 
             next_token = response.headers.get(HEADER_X_NEXT_ITER_TOKEN, "")
+
+            if not all_pages:
+                effective_next_token = (
+                    next_token if next_token and next_token != current_token else None
+                )
+                return {"items": data, "next_iteration_token": effective_next_token}
+
             if not next_token:
                 break
-            if next_token == iteration_token:
+            if next_token == current_token:
                 break  # infinite loop protection
 
             query["iteration_token"] = next_token
+            current_token = next_token
 
         return all_items
 
@@ -494,8 +586,11 @@ class AsperaNodeClient:
                 query["iteration_token"] = iteration_token
 
             data, response = self._request(
-                "GET", f"/files/{file_id}/files",
-                headers=headers, params=query, return_response=True,
+                "GET",
+                f"/files/{file_id}/files",
+                headers=headers,
+                params=query,
+                return_response=True,
             )
 
             if not isinstance(data, list):
@@ -539,8 +634,13 @@ class AsperaNodeClient:
             if depth > max_depth:
                 continue
 
-            result = self.list_files(current_path, count=count, sort_by=sort_by,
-                                     reverse=reverse, type_filter=type_filter)
+            result = self.list_files(
+                current_path,
+                count=count,
+                sort_by=sort_by,
+                reverse=reverse,
+                type_filter=type_filter,
+            )
 
             for entry in result["entries"]:
                 entry_with_depth = dict(entry)
@@ -548,7 +648,9 @@ class AsperaNodeClient:
                 all_entries.append(entry_with_depth)
 
                 if entry.get("type") in FOLDER_TYPES and depth < max_depth:
-                    dir_path = entry.get("path", "") or f"{current_path}/{entry['name']}"
+                    dir_path = (
+                        entry.get("path", "") or f"{current_path}/{entry['name']}"
+                    )
                     dir_path = _normalize_path(dir_path)
                     queue.append((dir_path, depth + 1))
 
@@ -610,7 +712,9 @@ class AsperaNodeClient:
             return {"file_id": top_file_id}
 
         # BFS through folder tree
-        folders_to_explore: deque[tuple[str, str, list[str]]] = deque([(top_file_id, "", path_elements[:])])
+        folders_to_explore: deque[tuple[str, str, list[str]]] = deque(
+            [(top_file_id, "", path_elements[:])]
+        )
 
         while folders_to_explore:
             current_id, current_path, remaining = folders_to_explore.popleft()
@@ -628,14 +732,18 @@ class AsperaNodeClient:
                     new_path = _normalize_path(current_path + "/" + entry["name"])
                     folders_to_explore.append((entry["id"], new_path, remaining[1:]))
 
-        raise AsperaApiError(f"Entry not found: {path_elements[0]} in /{_normalize_path(path_elements[:-1])}")
+        raise AsperaApiError(
+            f"Entry not found: {path_elements[0]} in /{_normalize_path(path_elements[:-1])}"
+        )
 
     # -------------------------------------------------------------------------
     # Common root detection for multiple paths (gen4)
     # -------------------------------------------------------------------------
 
     @staticmethod
-    def find_common_root(paths: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
+    def find_common_root(
+        paths: list[dict[str, Any]],
+    ) -> tuple[list[str], list[dict[str, Any]]]:
         """Find common root path from a list of source paths.
 
         .
@@ -674,7 +782,7 @@ class AsperaNodeClient:
         # Build relative paths
         source_paths = []
         for i, p in enumerate(paths):
-            relative_parts = split_sources[i][len(root):]
+            relative_parts = split_sources[i][len(root) :]
             relative_path = "/".join(relative_parts) if relative_parts else "."
             m = {"source": relative_path}
             if "destination" in p:
@@ -747,9 +855,7 @@ class AsperaNodeClient:
             "transfer_requests": [
                 {
                     "transfer_request": {
-                        "paths": [
-                            {"source": remote_path}
-                        ],
+                        "paths": [{"source": remote_path}],
                         "destination_root": local_dest,
                     }
                 }
@@ -817,7 +923,7 @@ class AsperaNodeClient:
                         "file_id": file_id,
                     }
                 }
-            }
+            },
         }
 
         # Add additional spec info (e.g., COS tags)
@@ -854,16 +960,24 @@ class AsperaNodeClient:
         """Get base download transfer spec (gen3)."""
         return self.create(
             "files/download_setup",
-            {"transfer_requests": [{"transfer_request": {"paths": [{"source": "/"}]}}]}
+            {"transfer_requests": [{"transfer_request": {"paths": [{"source": "/"}]}}]},
         )["transfer_specs"][0]["transfer_spec"]
 
     def get_transport_params(self) -> dict[str, Any]:
         """Get transport parameters from base spec."""
         if self._std_tspec_cache is None:
             spec = self.get_base_spec()
-            transport_fields = {"remote_host", "remote_user", "ssh_port", "fasp_port",
-                                "wss_enabled", "wss_port"}
-            self._std_tspec_cache = {k: v for k, v in spec.items() if k in transport_fields}
+            transport_fields = {
+                "remote_host",
+                "remote_user",
+                "ssh_port",
+                "fasp_port",
+                "wss_enabled",
+                "wss_port",
+            }
+            self._std_tspec_cache = {
+                k: v for k, v in spec.items() if k in transport_fields
+            }
         return self._std_tspec_cache
 
     # -------------------------------------------------------------------------
@@ -888,7 +1002,10 @@ class AsperaNodeClient:
 
         while True:
             data, response = self._request(
-                "GET", subpath, params=query, return_response=True,
+                "GET",
+                subpath,
+                params=query,
+                return_response=True,
             )
 
             if not isinstance(data, list):
@@ -914,7 +1031,7 @@ class AsperaNodeClient:
         """Close the HTTP session."""
         self._session.close()
 
-    def __enter__(self) -> "AsperaNodeClient":
+    def __enter__(self) -> "AsperaConnection":
         return self
 
     def __exit__(self, *args: Any) -> None:
@@ -939,17 +1056,21 @@ class AsperaNodeClient:
                 item_type = "file"
             if item_type == "symlink":
                 item_type = "symbolic_link"
-            entries.append({
-                "name": item.get("basename", ""),
-                "type": item_type,
-                "size": item.get("size", 0),
-                "modified": item.get("mtime", ""),
-                "path": item.get("path", default_path),
-            })
+            entries.append(
+                {
+                    "name": item.get("basename", ""),
+                    "type": item_type,
+                    "size": item.get("size", 0),
+                    "modified": item.get("mtime", ""),
+                    "path": item.get("path", default_path),
+                }
+            )
         if unknown_types:
             for t, cnt in sorted(unknown_types.items()):
-                print(f"Warning: {cnt} item(s) with unknown type '{t}' treated as 'file'",
-                      file=sys.stderr)
+                print(
+                    f"Warning: {cnt} item(s) with unknown type '{t}' treated as 'file'",
+                    file=sys.stderr,
+                )
         return entries
 
     @staticmethod
@@ -966,6 +1087,7 @@ class AsperaNodeClient:
             result = [e for e in result if e.get("type") == type_filter]
 
         if sort_by:
+
             def sort_key(e):
                 if sort_by == "name":
                     return e.get("name", "").lower()
@@ -1023,7 +1145,9 @@ def _generate_ssh_public_key_from_pem(pem_key: str) -> tuple[str, str]:
         ) from e
 
     if not isinstance(private_key, rsa.RSAPrivateKey):
-        raise ValueError("Only RSA private keys are supported for dynamic key authentication")
+        raise ValueError(
+            "Only RSA private keys are supported for dynamic key authentication"
+        )
 
     public_key = private_key.public_key()
     public_ssh = public_key.public_bytes(
@@ -1040,4 +1164,6 @@ def _generate_ssh_public_key_from_pem(pem_key: str) -> tuple[str, str]:
 
     public_key_str = f"{key_type_b64} {key_data_b64_str}"
 
-    return public_key_str, pem_key if isinstance(pem_key, str) else pem_key.decode("utf-8")
+    return public_key_str, pem_key if isinstance(pem_key, str) else pem_key.decode(
+        "utf-8"
+    )

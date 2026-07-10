@@ -9,3 +9,6 @@ tmp/
 
 # Sensitive configuration
 config.yaml
+
+# Local development scratch scripts
+scratch/

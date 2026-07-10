@@ -9,9 +9,9 @@ import tempfile
 import time
 from typing import Any, TypeVar
 
-from .node_api import AsperaNodeClient
+from .connection import AsperaConnection
 
-find_common_root = AsperaNodeClient.find_common_root
+find_common_root = AsperaConnection.find_common_root
 
 # Default path to Aspera Connect installer
 ASPERA_CONNECT_DIR = os.path.expanduser("~/.aspera/connect")
@@ -63,6 +63,7 @@ def get_fallback_cert_path() -> str | None:
         Full path to fallback certificate, or None.
     """
     return _resolve_sdk_key(_FALLBACK_CERT_NAME)
+
 
 # Default transfer spec constants
 DEFAULT_REMOTE_USER = "xfer"
@@ -122,6 +123,7 @@ def get_ascp_path() -> str:
 
     # Search system PATH
     import shutil
+
     found = shutil.which("ascp")
     if found:
         return found
@@ -161,6 +163,7 @@ def fix_resume_policy(transfer_spec: dict[str, Any]) -> dict[str, Any]:
 
 # -------------------------------------------------------------------------
 # -------------------------------------------------------------------------
+
 
 def build_transfer_spec_gen3(
     remote_host: str,
@@ -279,6 +282,7 @@ def build_transfer_spec_gen4(
 # -------------------------------------------------------------------------
 # -------------------------------------------------------------------------
 
+
 def build_file_list(
     paths: list[dict[str, Any]],
     source_root: str = "",
@@ -331,6 +335,7 @@ def build_file_list(
 # -------------------------------------------------------------------------
 # ascp command building
 # -------------------------------------------------------------------------
+
 
 def _build_ascp_command(
     token: str,
@@ -397,25 +402,38 @@ def _build_ascp_command(
     # 2. Transfer spec parameters (token, ports)
     if multi_session > 1:
         # Multi-session: per-session -O flags only (no base -O)
-        cmd.extend([
-            "-T",
-            "-P", str(ssh_port),
-            "-W", token,
-        ])
+        cmd.extend(
+            [
+                "-T",
+                "-P",
+                str(ssh_port),
+                "-W",
+                token,
+            ]
+        )
         for i in range(multi_session):
             udp_port = fasp_port + i
-            cmd.extend([
-                "-C", f"{i + 1}:{multi_session}",
-                "-O", str(udp_port),
-            ])
+            cmd.extend(
+                [
+                    "-C",
+                    f"{i + 1}:{multi_session}",
+                    "-O",
+                    str(udp_port),
+                ]
+            )
     else:
         # Single session: base -O flag
-        cmd.extend([
-            "-T",
-            "-P", str(ssh_port),
-            "-O", str(fasp_port),
-            "-W", token,
-        ])
+        cmd.extend(
+            [
+                "-T",
+                "-P",
+                str(ssh_port),
+                "-O",
+                str(fasp_port),
+                "-W",
+                token,
+            ]
+        )
 
     # 3. Set SSH private key for dynamic key auth (ascp reads this env var)
     if ssh_private_key:
@@ -461,6 +479,7 @@ def _build_ascp_command(
 # Extract spec from API response
 # -------------------------------------------------------------------------
 
+
 def extract_spec(token_data: dict[str, Any]) -> dict[str, Any]:
     """Extract transfer spec from API response.
 
@@ -475,6 +494,7 @@ def extract_spec(token_data: dict[str, Any]) -> dict[str, Any]:
 # -------------------------------------------------------------------------
 # Transfer execution
 # -------------------------------------------------------------------------
+
 
 def download_with_progress(
     token_data: dict[str, Any],
@@ -544,8 +564,12 @@ def download_with_progress(
 
     # Check https_fallback from API response
     api_https_fallback = token_data.get("https_fallback", spec.get("https_fallback"))
-    api_fallback_port = token_data.get("https_fallback_port", spec.get("https_fallback_port"))
-    api_fallback_url = token_data.get("https_fallback_url", spec.get("https_fallback_url"))
+    api_fallback_port = token_data.get(
+        "https_fallback_port", spec.get("https_fallback_port")
+    )
+    api_fallback_url = token_data.get(
+        "https_fallback_url", spec.get("https_fallback_url")
+    )
 
     # Get remote paths from the response
     source_root = spec.get("source_root", "")
@@ -556,15 +580,23 @@ def download_with_progress(
     # Build ascp command
     if (remote_path and remote_host) or file_list_path:
         # Determine effective fallback settings: API response takes precedence
-        effective_fallback = api_https_fallback if api_https_fallback is not None else http_fallback
+        effective_fallback = (
+            api_https_fallback if api_https_fallback is not None else http_fallback
+        )
         effective_fallback_port = api_fallback_port if api_fallback_port else None
 
         if effective_fallback and effective_fallback_port:
-            print(f"  HTTP fallback enabled (port: {effective_fallback_port})", file=sys.stderr)
+            print(
+                f"  HTTP fallback enabled (port: {effective_fallback_port})",
+                file=sys.stderr,
+            )
         elif effective_fallback:
             print("  HTTP fallback enabled", file=sys.stderr)
         else:
-            print("  HTTP fallback disabled (not supported by server or keys unavailable)", file=sys.stderr)
+            print(
+                "  HTTP fallback disabled (not supported by server or keys unavailable)",
+                file=sys.stderr,
+            )
         if api_fallback_url:
             print(f"  Fallback URL: {api_fallback_url}", file=sys.stderr)
 
@@ -616,7 +648,10 @@ def download_with_progress(
 
     print("Starting Aspera transfer...", file=sys.stderr)
     if env:
-        print(f"  Environment: {dict((k, '***' if k in ('ASPERA_SCP_TOKEN', 'ASPERA_SCP_SSH_PRIVATE_KEY') else v) for k, v in env.items())}", file=sys.stderr)
+        print(
+            f"  Environment: {dict((k, '***' if k in ('ASPERA_SCP_TOKEN', 'ASPERA_SCP_SSH_PRIVATE_KEY') else v) for k, v in env.items())}",
+            file=sys.stderr,
+        )
     print(file=sys.stderr)
 
     start_time = time.time()
@@ -697,10 +732,11 @@ def _execute_ascp(
                 process.wait(timeout=5)
             last_exit_code = 1
             if attempt < max_retries:
-                delay = DEFAULT_RETRY_BACKOFF ** attempt + DEFAULT_RETRY_JITTER * (attempt + 1)
+                delay = DEFAULT_RETRY_BACKOFF**attempt + DEFAULT_RETRY_JITTER * (
+                    attempt + 1
+                )
                 print(
-                    f"  Retry {attempt + 1}/{max_retries} after timeout "
-                    f"({delay:.1f}s)",
+                    f"  Retry {attempt + 1}/{max_retries} after timeout ({delay:.1f}s)",
                     file=sys.stderr,
                 )
                 time.sleep(delay)
@@ -739,7 +775,9 @@ def _execute_ascp(
             return last_exit_code
 
         if attempt < max_retries:
-            delay = DEFAULT_RETRY_BACKOFF ** attempt + DEFAULT_RETRY_JITTER * (attempt + 1)
+            delay = DEFAULT_RETRY_BACKOFF**attempt + DEFAULT_RETRY_JITTER * (
+                attempt + 1
+            )
             print(
                 f"  Retry {attempt + 1}/{max_retries} (exit code {last_exit_code}) "
                 f"after {delay:.1f}s",

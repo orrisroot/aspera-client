@@ -12,15 +12,16 @@ authors = [
     {name = "Yoshihiro OKUMURA", email = "orrisroot@gmail.com"},
 ]
 dependencies = [
-    "requests>=2.31.0",
-    "pyyaml>=6.0",
-    "cryptography",
-    "rich>=13.0.0",
+    "requests>=2.34.2",
+    "pyyaml>=6.0.3",
+    "cryptography>=49.0.0",
+    "rich>=15.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.4.0",
+    "ruff>=0.15.21",
+    "pytest>=9.1.1",
 ]
 
 [project.scripts]
