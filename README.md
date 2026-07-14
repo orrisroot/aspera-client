@@ -1,18 +1,24 @@
-# Aspera Node API Client
+# aspera-client
 
-A CLI tool for IBM Aspera Node API. Supports file listing, searching, and high-speed downloads via ascp.
+Client for IBM Aspera combining **Node API** (Gen3/Gen4) for file operations and **ascp** for high-speed transfer.
+
+**Features**
+
+- **Directory listing** — browse remote paths via Node API with sorting, filtering, recursive traversal
+- **File search** — find files via Node API by glob, regex, or field comparison
+- **High-speed download** — transfer files via `ascp` (FASP protocol) with automatic retry and HTTP fallback
+- **Environment setup** — install Aspera Connect SDK and generate authentication keys
+
+**Interface**
+
+- [CLI Reference](./CLI_REFERENCE.md) — `aspera` command for terminal operations
+- [Python API Reference](./API_REFERENCE.md) — importable library for script integration
 
 ## Requirements
 
 - Python 3.11+
 - `cryptography` (for key generation and dynamic key authentication)
-
-**Ascp path resolution** (priority order):
-1. `ASPERA_ASCP` environment variable
-2. `~/.aspera/connect/bin/ascp` (default install location)
-3. System `PATH`
-
-**Setup command:** Run `aspera setup` (or call `setup_environment()` in Python) to install the Aspera Connect SDK and generate required authentication keys (bypass key for token auth, fallback key for HTTP fallback). Keys are stored in `~/.aspera/connect/` (or your custom `AsperaEnvironment.base_dir`) and automatically applied to download commands. The bypass key is bundled as a DER file in `aspera_client/data/bypass_rsa.der`.
+- Aspera Connect SDK (installed via `aspera setup`)
 
 ## Installation
 
@@ -20,7 +26,7 @@ A CLI tool for IBM Aspera Node API. Supports file listing, searching, and high-s
 pip install -e .
 ```
 
-Or:
+Or install dependencies directly:
 
 ```bash
 pip install requests pyyaml cryptography rich
@@ -28,19 +34,20 @@ pip install requests pyyaml cryptography rich
 
 ## Setup
 
-Run the setup command to install the Aspera Connect SDK and generate authentication keys:
+Run the setup command to install `ascp` (from Aspera Connect SDK) and generate authentication keys:
 
 ```bash
 aspera setup
 ```
 
 Options:
-- `--no-sdk`: Skip SDK installation (use existing SDK)
+- `--no-sdk`: Skip SDK download (use existing `ascp`)
 - `--no-bypass-key`: Skip bypass key generation
 - `--no-fallback-key`: Skip fallback key generation
 - `--version VERSION`: Install a specific SDK version
 
 The setup command creates:
+- `~/.aspera/connect/bin/ascp` — Aspera high-speed transfer client (from Connect SDK)
 - `~/.aspera/connect/client/aspera_bypass_rsa.pem` — Bypass key for token authentication (used with `-i` flag)
 - `~/.aspera/connect/client/aspera_fallback_cert.pem` — Fallback certificate for HTTP fallback (used with `-I` flag)
 - `~/.aspera/connect/client/aspera.conf` — Aspera configuration file (copied from SDK)
@@ -48,11 +55,7 @@ The setup command creates:
 
 Generated files are stored in `~/.aspera/connect/client/` to keep them separate from SDK files.
 
-Keys are automatically applied to `download` commands.
-
-## Python Library Usage
-
-This package can also be used as a Python library. For detailed Python API references, modular package architecture, and script integration examples, please refer to [API_REFERENCE.md](./API_REFERENCE.md).
+Keys are automatically applied to download commands.
 
 ## Configuration
 
@@ -74,8 +77,6 @@ password: "your_password"
 # SSL verification (set to false for self-signed certificates)
 verify_ssl: true
 
-# URL path prefix (e.g., "/node_api" for servers behind a proxy)
-
 # Request timeout in seconds
 timeout: 30
 
@@ -86,136 +87,10 @@ accept_v4: true
 # private_key_file: "/path/to/aspera_private_key.pem"
 ```
 
-## Usage
+## Documentation
 
-### Global Options
-
-```bash
-aspera [-c config.yaml] [--url URL] [--user USER] [--password PASS] {list|find|download|setup} ...
-```
-
-- `-c, --config`: Path to configuration file (default: config.yaml)
-- `--url`: Aspera Node server URL (overrides config, e.g. `https://host:9092`)
-- `--user`: Username (overrides config)
-- `--password`: Password (overrides config)
-
-### List Files
-
-```bash
-aspera list [/remote/path]
-```
-
-Examples:
-```bash
-aspera list /
-aspera list /shared/documents
-aspera list / --gen4 --file-id abc123
-```
-
-Output:
-```
-Directory: /shared/documents (3 items)
-
-   Size   Modified          Name
-dr -      2026-05-24T00:00:00Z reports
-fw 12K    2026-05-23T12:00:00Z readme.txt
-l- 256    2026-05-23T11:00:00Z latest
-```
-
-**Attribute column** (2 chars): `d`=directory, `f`=file, `l`=symlink + `r`=read, `w`=write, `a`=admin, `-`=none
-
-**Color coding**:
-- Directories → blue (bold)
-- Symlinks → cyan
-- Archives (.zip, .gz, etc.) → magenta
-- Media files (.jpg, .mp4, .mp3, etc.) → yellow
-
-#### List Options
-
-```bash
-aspera list [/remote/path] [options]
-
-  -n, --count COUNT       Max entries per page (default: 1000)
-  -r, --recursive         Recursively list subdirectories
-  --sort FIELD            Sort field: name, size, modified, type, depth (default: name)
-  --reverse               Reverse sort order
-  --dirs-first            Show directories before files
-  --type TYPE             Filter by type: file, directory, symbolic_link
-  -f, --format FORMAT     Output format: table, json, csv (default: table)
-  --fields FIELDS         Comma-separated fields to display. Use '-' prefix to exclude (e.g., '-id,-path')
-  --gen4                  Use gen4 API (Accept-Version: 4.0, iteration_token pagination)
-  --file-id FILE_ID       Gen4 file ID to browse (instead of path)
-  --matcher PATTERN       File matcher pattern (glob, regex, or None for all). For --find command.
-```
-
-### Find Files
-
-Search for files matching a pattern:
-
-```bash
-aspera find /search/root 'pattern'
-```
-
-Examples:
-```bash
-aspera find / '*.txt'
-aspera find / '^test.*'
-aspera find / 'size>1000'
-aspera find / '*.log' -r
-```
-
-#### Find Options
-
-```bash
-aspera find [path] pattern [options]
-
-  -r, --recursive         Recursively search subdirectories
-  -n, --count COUNT       Max entries per page (default: 1000)
-  -f, --format FORMAT     Output format: table, json, csv (default: table)
-  --fields FIELDS         Comma-separated list of fields to display
-  --gen4                  Use gen4 API
-  --file-id FILE_ID       Gen4 file ID to search from
-```
-
-**Pattern types:**
-- **Glob**: `*.txt`, `*.log` (fnmatch style)
-- **Regex**: `^test.*`, `[0-9]+\.csv`
-- **Field comparison**: `size>1000`, `type=file`, `depth>=2`
-
-### Download a File
-
-```bash
-aspera download /remote/path/to/file.zip /local/destination/
-```
-
-Examples:
-```bash
-aspera download /shared/largefile.iso ./downloads/
-aspera download /shared/file1.txt /shared/file2.txt ./downloads/
-aspera download /remote/path --gen4 --file-id abc123
-```
-
-#### Download Options
-
-```bash
-aspera download <remote_path>... <local_dest> [options]
-
-  --dry-run               Show transfer specs without executing
-  --resume                Resume interrupted transfer
-  -f, --format FORMAT     Output format: text, json (default: text)
-  -q, --quiet             Suppress ascp progress bar output
-  -M, --multi-session N   Number of concurrent transfer sessions (default: 1)
-  --gen4                  Use gen4 transfer spec
-  --file-id FILE_ID       Gen4 file ID for transfer
-  --retries N             Max retry attempts on transient failure (default: 3)
-  --timeout SECS          Transfer timeout in seconds (default: 120)
-  --ascp-path PATH        Path to ascp binary (overrides auto-detection)
-  --verbose               Enable verbose ascp output (-m flag)
-```
-
-**Retry behavior:** Transfers are automatically retried on transient failures (network errors, token expiry, FASP handshake issues) with exponential backoff. Non-retryable errors (authentication, permission denied, disk full) fail immediately. The default transfer timeout is 120 seconds (override with `--timeout`).
-
-**Automatic key application:** After running `setup`, the bypass key and fallback certificate are automatically detected and applied to download commands. The bypass key is used for token authentication, and the fallback certificate enables HTTP fallback transfer (via `-I` and `-y 1` flags). The fallback port is taken from the API response (`https_fallback_port`) or defaults to 443.
+- [CLI Reference](./CLI_REFERENCE.md) — command-line usage and options
+- [Python API Reference](./API_REFERENCE.md) — library usage, quick start, and class/function docs
 
 ## Authentication
 
