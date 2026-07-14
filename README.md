@@ -69,6 +69,7 @@ Edit `config.yaml` with your Aspera Node server information:
 
 ```yaml
 # Aspera Node server URL (replaces separate host/port settings)
+# Port is optional: defaults to 80 for http, 443 for https
 url: "https://node.example.com:9092"
 
 user: "node_user"

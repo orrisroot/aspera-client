@@ -7,7 +7,7 @@ aspera [-c config.yaml] [--url URL] [--user USER] [--password PASS] {list|find|d
 ```
 
 - `-c, --config`: Path to configuration file (default: config.yaml)
-- `--url`: Aspera Node server URL (overrides config, e.g. `https://host:9092`)
+- `--url`: Aspera Node server URL (overrides config, e.g. `https://host:9092`). Port is optional: defaults to 80 for `http`, 443 for `https`.
 - `--user`: Username (overrides config)
 - `--password`: Password (overrides config)
 

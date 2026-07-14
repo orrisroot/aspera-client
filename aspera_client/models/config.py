@@ -6,6 +6,12 @@ import urllib.parse
 import yaml
 from dataclasses import dataclass
 
+_DEFAULT_PORT_BY_SCHEME = {"http": 80, "https": 443}
+
+
+def _default_port_for_scheme(scheme: str) -> int:
+    return _DEFAULT_PORT_BY_SCHEME.get(scheme.lower(), 9092)
+
 
 @dataclass
 class AsperaConfig:
@@ -27,7 +33,7 @@ class AsperaConfig:
         if url:
             parsed = urllib.parse.urlparse(url)
             host = parsed.hostname or "localhost"
-            port = parsed.port or 9092
+            port = parsed.port or _default_port_for_scheme(parsed.scheme)
         else:
             host = data.get("host", "localhost")
             port = data.get("port", 9092)
@@ -75,7 +81,7 @@ def resolve_host_port(
     if effective_url:
         parsed = urllib.parse.urlparse(effective_url)
         resolved_host = parsed.hostname or "localhost"
-        resolved_port = parsed.port or 9092
+        resolved_port = parsed.port or _default_port_for_scheme(parsed.scheme)
         return resolved_host, resolved_port
 
     resolved_host = host or config.get("host", "localhost")

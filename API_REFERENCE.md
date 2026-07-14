@@ -73,7 +73,7 @@ A data class containing parameters for connecting to the Aspera Node API.
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `host` | `str` | `"localhost"` | Host name or IP address of the Aspera Node server. |
-| `port` | `int` | `9092` | The port number of the Node API. |
+| `port` | `int` | `9092` | The port number of the Node API. When a `url` is provided without an explicit port, defaults to 80 (`http`) or 443 (`https`). |
 | `user` | `str \| None` | `None` | Access Key ID / Username for HTTP Basic Auth. |
 | `password` | `str \| None` | `None` | Secret Key / Password for HTTP Basic Auth. |
 | `verify_ssl` | `bool` | `True` | Whether to verify SSL certificates. Set `False` for self-signed certificates. |
@@ -83,7 +83,7 @@ A data class containing parameters for connecting to the Aspera Node API.
 
 #### Class Methods
 - **`AsperaConfig.from_dict(data: dict) -> AsperaConfig`**
-  Builds an `AsperaConfig` instance from a dictionary, auto-resolving Host and Port if a unified `url` field is provided.
+  Builds an `AsperaConfig` instance from a dictionary, auto-resolving Host and Port if a unified `url` field is provided. When the URL omits a port, the default port is determined by the scheme (`http` → 80, `https` → 443).
 
 ---
 
