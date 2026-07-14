@@ -233,7 +233,7 @@ def main() -> None:
         "--timeout",
         type=int,
         default=None,
-        help="Transfer timeout in seconds (default: no timeout)",
+        help="Transfer timeout in seconds (default: 120)",
     )
     download_parser.add_argument(
         "--ascp-path",
@@ -242,7 +242,7 @@ def main() -> None:
     download_parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Enable verbose ascp output (-m flag)",
+        help="Enable verbose ascp output (-v flag)",
     )
 
     # setup subcommand

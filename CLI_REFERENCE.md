@@ -122,7 +122,7 @@ aspera download <remote_path>... <local_dest> [options]
   --retries N             Max retry attempts on transient failure (default: 3)
   --timeout SECS          Transfer timeout in seconds (default: 120)
   --ascp-path PATH        Path to ascp binary (overrides auto-detection)
-  --verbose               Enable verbose ascp output (-m flag)
+  --verbose               Enable verbose ascp output (-v flag)
 ```
 
 **Retry behavior:** Transfers are automatically retried on transient failures (network errors, token expiry, FASP handshake issues) with exponential backoff. Non-retryable errors (authentication, permission denied, disk full) fail immediately. The default transfer timeout is 120 seconds (override with `--timeout`).

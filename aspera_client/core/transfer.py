@@ -148,6 +148,14 @@ POLICY_FIX = {
     "full_csum": "full_checksum",
 }
 
+# ascp -k resume level mapping (IBM docs: -k {0|1|2|3})
+ASCP_RESUME_LEVEL = {
+    "none": "0",
+    "attributes": "1",
+    "sparse_checksum": "2",
+    "full_checksum": "3",
+}
+
 
 def fix_resume_policy(transfer_spec: dict[str, Any]) -> dict[str, Any]:
     """Fix resume policy discrepancy between gen3 and gen4.
@@ -397,7 +405,7 @@ def _build_ascp_command(
 
     # Verbose mode (enables detailed ascp output)
     if verbose:
-        cmd.append("-m")
+        cmd.append("-v")
 
     # 2. Transfer spec parameters (token, ports)
     if multi_session > 1:
@@ -444,10 +452,11 @@ def _build_ascp_command(
         cmd.insert(2, bypass_key)
         cmd.insert(2, "-i")
 
-    # Only add -R when resume=True (user explicitly requested resume)
+    # Only add -k when resume=True (user explicitly requested resume)
     if resume:
-        policy = fix_resume_policy({"resume_policy": resume_policy})["resume_policy"]
-        cmd.extend(["-R", policy])
+        fixed = fix_resume_policy({"resume_policy": resume_policy})["resume_policy"]
+        k_level = ASCP_RESUME_LEVEL.get(fixed, "0")
+        cmd.extend(["-k", k_level])
 
     # 5. File list
     if file_list:
