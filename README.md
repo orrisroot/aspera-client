@@ -34,7 +34,7 @@ pip install requests pyyaml cryptography rich
 
 ## Setup
 
-Run the setup command to install `ascp` (from Aspera Connect SDK) and generate authentication keys:
+Run the setup command to install `ascp` (from Aspera Connect SDK) and generate authentication keys. It picks the SDK build for the machine from IBM's listing, on Linux and on macOS (Intel and Apple silicon):
 
 ```bash
 aspera setup

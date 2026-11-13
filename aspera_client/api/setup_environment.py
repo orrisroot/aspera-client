@@ -5,12 +5,16 @@ from __future__ import annotations
 import datetime
 import os
 import platform
+import re
+import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -36,33 +40,39 @@ from ..models.environment import AsperaEnvironment
 
 _BYPASS_DER_PATH = Path(__file__).parent.parent / "data" / "bypass_rsa.der"
 _RUNTIME_FOLDERS = ("bin", "lib", "sbin", "aspera", "etc")
+# Finder adds this folder of resource forks to the zips it makes.
+_MACOS_METADATA = "__MACOSX/"
 SDK_LOCATION_URL = "https://ibm.biz/sdk_location"
 
 
 def _get_platform_info() -> tuple[str, str]:
-    """Get platform name and architecture for SDK download."""
+    """Get platform name and architecture for SDK download, in IBM's naming."""
     sys_name = platform.system().lower()
     machine = platform.machine().lower()
 
+    # The names IBM's SDK listing uses (https://ibm.biz/sdk_location).
     arch_map = {
         "x86_64": "x86_64",
         "amd64": "x86_64",
-        "aarch64": "aarch64",
-        "arm64": "aarch64",
-        "i686": "i386",
-        "i386": "i386",
-        "x86": "i386",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "ppc64le": "ppc64le",
+        "ppc64": "ppc64",
+        "s390x": "s390",
     }
     arch = arch_map.get(machine, machine)
 
     if sys_name == "darwin":
         platform_name = f"osx-{arch}"
-    elif sys_name == "linux":
-        platform_name = f"linux-{arch}"
     else:
         platform_name = f"{sys_name}-{arch}"
 
     return platform_name, arch
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """Order versions numerically, so 1.1.10 comes after 1.1.9."""
+    return tuple(int(x) for x in re.findall(r"\d+", version))
 
 
 def _download_file(url: str, dest_path: str, quiet: bool = False) -> None:
@@ -87,64 +97,151 @@ def _download_file(url: str, dest_path: str, quiet: bool = False) -> None:
             print(file=sys.stderr)
 
 
+def _top_level(names: list[str]) -> str:
+    """The folder wrapping the SDK, or "" when the archive has none.
+
+    Files beside the folder (a README, .DS_Store) do not count, nor does Finder's
+    __MACOSX folder.
+    """
+    folders = {
+        n.split("/", 1)[0]
+        for n in names
+        if "/" in n.strip("/") or n.endswith("/")
+        if not n.startswith(_MACOS_METADATA)
+    }
+    if len(folders) == 1:
+        folder = folders.pop()
+        # An unwrapped archive holding only bin/ has no wrapper to strip.
+        if folder not in _RUNTIME_FOLDERS:
+            return folder
+    return ""
+
+
+def _runtime_parts(name: str, top_level: str, quiet: bool) -> list[str] | None:
+    """The path to extract an entry to, or None for an entry left out.
+
+    Only the runtime folders are kept, and nothing may leave the destination.
+    """
+    if name.startswith(_MACOS_METADATA):
+        return None
+    parts = [p for p in name.split("/") if p and p != "."]
+    if top_level and parts and parts[0] == top_level:
+        parts = parts[1:]
+    if not parts or parts[0] not in _RUNTIME_FOLDERS:
+        return None
+    if ".." in parts or name.startswith("/"):
+        if not quiet:
+            print(f"  Skipping suspicious path: {name}", file=sys.stderr)
+        return None
+    return parts
+
+
+def _within(root: str | Path, path: str | Path) -> bool:
+    """Whether path, following the symlinks already on disk, stays inside root."""
+    root = os.path.realpath(root)
+    path = os.path.realpath(path)
+    return path == root or path.startswith(root + os.sep)
+
+
 def _extract_sdk_archive(archive_path: str, dest_dir: str, quiet: bool = False) -> None:
-    """Extract SDK archive (tar.gz) to dest_dir, extracting only runtime folders."""
+    """Extract SDK archive (tar.gz, or zip on macOS) to dest_dir, extracting only runtime folders."""
     if not quiet:
         print(f"  Extracting to {dest_dir}...", file=sys.stderr)
+    if zipfile.is_zipfile(archive_path):
+        _extract_zip_archive(archive_path, dest_dir, quiet=quiet)
+    else:
+        _extract_tar_archive(archive_path, dest_dir, quiet=quiet)
+
+    # An archive may not carry permissions (a zip made off Unix), and these hold
+    # only programs.
+    for folder in ("bin", "sbin"):
+        exe_dir = Path(dest_dir) / folder
+        if exe_dir.is_dir():
+            for f in exe_dir.iterdir():
+                if f.is_file() and not f.is_symlink():
+                    try:
+                        os.chmod(f, 0o755)
+                    except OSError:
+                        pass
+
+
+def _extract_zip_archive(archive_path: str, dest_dir: str, quiet: bool = False) -> None:
+    """Extract the runtime folders of a zip, as IBM ships the SDK for macOS."""
+    with zipfile.ZipFile(archive_path) as zf:
+        top_level = _top_level(zf.namelist())
+        for info in zf.infolist():
+            parts = _runtime_parts(info.filename, top_level, quiet)
+            if parts is None:
+                continue
+            target = Path(dest_dir, *parts)
+            # Checked against the disk, not the name: a link extracted earlier can
+            # turn a harmless-looking path into one leading out of dest_dir.
+            if not _within(dest_dir, target.parent):
+                if not quiet:
+                    print(
+                        f"  Skipping path leaving the SDK: {info.filename}",
+                        file=sys.stderr,
+                    )
+                continue
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # zipfile keeps the Unix file type and permissions in the upper bits,
+            # but extracts every entry as a regular file without them.
+            unix_mode = info.external_attr >> 16
+            if stat.S_ISLNK(unix_mode):
+                link = zf.read(info).decode("utf-8")
+                if not _within(dest_dir, target.parent / link):
+                    if not quiet:
+                        print(
+                            f"  Skipping link leaving the SDK: {info.filename}",
+                            file=sys.stderr,
+                        )
+                    continue
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
+                elif target.exists():
+                    if not quiet:
+                        print(
+                            f"  Skipping link over a folder: {info.filename}",
+                            file=sys.stderr,
+                        )
+                    continue
+                os.symlink(link, target)
+                continue
+            with zf.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            if unix_mode & 0o777:
+                os.chmod(target, unix_mode & 0o777)
+
+
+def _extract_tar_archive(archive_path: str, dest_dir: str, quiet: bool = False) -> None:
+    """Extract the runtime folders of a tar.gz, as IBM ships the SDK for Linux."""
     with tarfile.open(archive_path, "r:gz") as tar:
-        all_names = tar.getnames()
-
-        top_level = ""
-        for n in all_names:
-            parts = n.split("/")
-            if len(parts) > 1 and parts[0]:
-                top_level = parts[0]
-                break
-
-        extract_map = {}
+        top_level = _top_level(tar.getnames())
+        has_data_filter = hasattr(tarfile, "data_filter")
+        selected = []
         for member in tar.getmembers():
-            parts = member.name.split("/")
-
-            if top_level and len(parts) > 1 and parts[0] == top_level:
-                effective_parts = parts[1:]
-            else:
-                effective_parts = parts
-
-            if member.isdir() and effective_parts == [] and top_level:
+            if not (member.isdir() or member.isfile() or member.issym()):
                 continue
-
-            if member.isdir():
-                if effective_parts and effective_parts[0] in _RUNTIME_FOLDERS:
-                    new_name = "/".join(effective_parts)
-                    extract_map[member.name] = new_name
-            elif member.isfile():
-                if effective_parts and effective_parts[0] in _RUNTIME_FOLDERS:
-                    if ".." in member.name:
-                        if not quiet:
-                            print(
-                                f"  Skipping suspicious path: {member.name}",
-                                file=sys.stderr,
-                            )
-                        continue
-                    new_name = "/".join(effective_parts)
-                    extract_map[member.name] = new_name
-
-        for member in tar.getmembers():
-            if member.name not in extract_map:
+            parts = _runtime_parts(member.name, top_level, quiet)
+            if parts is None:
                 continue
-            member.name = extract_map[member.name]
+            if member.issym() and not has_data_filter:
+                # Without the data filter nothing checks where a chain of links
+                # leads, so links are left out rather than trusted.
+                continue
+            member.name = "/".join(parts)
+            selected.append(member)
 
-        sorted_members = sorted(tar.getmembers(), key=lambda m: (not m.isdir(), m.name))
-        tar.extractall(path=dest_dir, members=sorted_members)
-
-    bin_dir = Path(dest_dir) / "bin"
-    if bin_dir.exists():
-        for f in bin_dir.iterdir():
-            if f.is_file():
-                try:
-                    os.chmod(f, 0o755)
-                except OSError:
-                    pass
+        selected.sort(key=lambda m: (not m.isdir(), m.name))
+        # Only the selected members, and through the data filter, which checks each
+        # path and link against the disk, so nothing outside dest_dir is written.
+        if has_data_filter:
+            tar.extractall(path=dest_dir, members=selected, filter="data")
+        else:
+            tar.extractall(path=dest_dir, members=selected)
 
 
 def _write_file_restricted(path: str, content: bytes, mode: int = 0o644) -> str:
@@ -225,8 +322,6 @@ def _write_ascp_version_meta(
         )
         if result.returncode == 0:
             output = result.stdout.decode("utf-8", errors="replace")
-            import re
-
             m = re.search(r"version ([0-9.]+)", output)
             version = m.group(1) if m else "unknown"
         else:
@@ -301,6 +396,17 @@ def generate_fallback_keys(env: AsperaEnvironment | None = None) -> tuple[str, s
     return key_path, cert_path
 
 
+def _find_ascp(sdk_dir: Path) -> Path | None:
+    """The ascp binary in an unpacked SDK: bin/ascp, or wherever the archive put it."""
+    ascp_path = sdk_dir / "bin" / "ascp"
+    if ascp_path.is_file():
+        return ascp_path
+    for candidate in sdk_dir.rglob("ascp"):
+        if candidate.is_file() and not candidate.suffix:
+            return candidate
+    return None
+
+
 def install_sdk(
     version: str | None = None,
     quiet: bool = False,
@@ -309,7 +415,6 @@ def install_sdk(
     """Install Aspera Transfer SDK."""
     env = env or AsperaEnvironment()
     sdk_dir = Path(env.base_dir)
-    sdk_bin_dir = Path(env.bin_dir)
 
     platform_name, arch = _get_platform_info()
     if not quiet:
@@ -320,6 +425,11 @@ def install_sdk(
     platform_entries = [
         loc for loc in sdk_locations if loc["platform"] == platform_name
     ]
+    if platform_name.startswith("osx-"):
+        # IBM also ships a universal build that runs on either Mac architecture.
+        platform_entries += [
+            loc for loc in sdk_locations if loc["platform"] == "osx-universal"
+        ]
     if not platform_entries:
         available = set(loc["platform"] for loc in sdk_locations)
         raise RuntimeError(
@@ -335,9 +445,13 @@ def install_sdk(
                 f"Version '{version}' not found for {platform_name}. "
                 f"Available: {versions}"
             )
-        selected = version_entries[0]
-    else:
-        selected = max(platform_entries, key=lambda e: e["version"])
+        platform_entries = version_entries
+    # The newest version, and of one version the build for this machine over the
+    # universal one.
+    selected = max(
+        platform_entries,
+        key=lambda e: (_version_key(e["version"]), e["platform"] == platform_name),
+    )
 
     sdk_url = selected["url"]
     sdk_version = selected["version"]
@@ -345,44 +459,40 @@ def install_sdk(
         print(f"  SDK version: {sdk_version}", file=sys.stderr)
         print(f"  URL: {sdk_url}", file=sys.stderr)
 
-    if sdk_dir.exists() and any(sdk_dir.iterdir()):
-        backup_dir = f"{sdk_dir}.{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
-        if not quiet:
-            print(f"  Backing up existing SDK to {backup_dir}", file=sys.stderr)
-        import shutil
-
-        shutil.move(str(sdk_dir), backup_dir)
-
     if not quiet:
         print("  Downloading SDK...", file=sys.stderr)
-    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+    suffix = ".zip" if sdk_url.lower().endswith(".zip") else ".tar.gz"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = tmp.name
 
+    # Unpacked aside and moved into place only once ascp is there, so a failed
+    # download or extraction leaves the installed SDK as it was.
+    sdk_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{sdk_dir.name}-", dir=sdk_dir.parent))
     try:
         _download_file(sdk_url, tmp_path, quiet=quiet)
-        _extract_sdk_archive(tmp_path, str(sdk_dir), quiet=quiet)
+        _extract_sdk_archive(tmp_path, str(staging_dir), quiet=quiet)
+        staged_ascp = _find_ascp(staging_dir)
+        if staged_ascp is None:
+            raise RuntimeError(f"ascp binary not found after extraction in {sdk_dir}")
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
 
-    ascp_path = sdk_bin_dir / "ascp"
-    if not ascp_path.exists():
-        for candidate in sdk_dir.rglob("ascp"):
-            if candidate.is_file() and not candidate.suffix:
-                ascp_path = candidate
-                break
-
-    if not ascp_path.exists():
-        raise RuntimeError(f"ascp binary not found after extraction in {sdk_dir}")
-
-    for f in sdk_bin_dir.iterdir():
-        if f.is_file():
-            try:
-                os.chmod(f, 0o755)
-            except OSError:
-                pass
+    if sdk_dir.exists() and any(sdk_dir.iterdir()):
+        backup_dir = f"{sdk_dir}.{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+        if not quiet:
+            print(f"  Backing up existing SDK to {backup_dir}", file=sys.stderr)
+        shutil.move(str(sdk_dir), backup_dir)
+    elif sdk_dir.exists():
+        sdk_dir.rmdir()
+    os.replace(staging_dir, sdk_dir)
+    ascp_path = sdk_dir / staged_ascp.relative_to(staging_dir)
 
     _write_ascp_version_meta(str(ascp_path), env)
 
@@ -401,8 +511,6 @@ def generate_aspera_conf(env: AsperaEnvironment | None = None) -> str:
 
     sdk_conf = Path(env.base_dir) / "etc" / "aspera.conf"
     if sdk_conf.exists():
-        import shutil
-
         shutil.copy2(str(sdk_conf), conf_path)
         os.chmod(conf_path, 0o644)
         return conf_path
