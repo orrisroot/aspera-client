@@ -12,7 +12,7 @@ from .models import (
 from .core import AsperaConnection, AsperaNodeError, AsperaAuthError, AsperaApiError
 from .api import browse, download, setup_environment
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "AsperaConnection",
     "AsperaNodeError",

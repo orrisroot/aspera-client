@@ -78,7 +78,7 @@ def _version_key(version: str) -> tuple[int, ...]:
 def _download_file(url: str, dest_path: str, quiet: bool = False) -> None:
     """Download a file from URL to dest_path."""
     context = ssl.create_default_context()
-    req = urllib.request.Request(url, headers={"User-Agent": "aspera-client/0.1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "aspera-client/0.1.1"})
     with urllib.request.urlopen(req, context=context, timeout=120) as response:
         total = response.getheader("Content-Length", 0)
         total = int(total) if total else 0
@@ -299,7 +299,7 @@ def _fetch_sdk_locations() -> list[dict[str, str]]:
     context = ssl.create_default_context()
     req = urllib.request.Request(
         SDK_LOCATION_URL,
-        headers={"User-Agent": "aspera-client/0.1.0"},
+        headers={"User-Agent": "aspera-client/0.1.1"},
     )
     with urllib.request.urlopen(req, context=context, timeout=30) as response:
         import yaml

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aspera-client"
-version = "0.1.0"
+version = "0.1.1"
 description = "IBM Aspera Node API client CLI for file listing and high-speed transfer"
 requires-python = ">=3.11"
 license = {text = "MIT"}
