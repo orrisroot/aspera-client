@@ -209,6 +209,8 @@ def download(
 ) -> dict[str, Any]
 ```
 
+With `quiet=True` (the default) the transfer prints only a failure, with its reason, and a warning when no key can authenticate it; progress, retries and success are not printed. An interrupt (`KeyboardInterrupt`) stops `ascp` and is raised again, so it is not reported as a failed transfer.
+
 ---
 
 ### `setup_environment()` (`aspera_client.api.setup_environment`)

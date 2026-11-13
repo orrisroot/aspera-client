@@ -87,6 +87,10 @@ def cmd_download(args: argparse.Namespace) -> int:
                 return 1
             return 0
 
+    except KeyboardInterrupt:
+        # ascp, if it had started, has been stopped.
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
     except FileNotFoundError as e:
         print(f"File error: {e}", file=sys.stderr)
         return 1

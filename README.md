@@ -144,7 +144,7 @@ During downloads, real-time progress is displayed by ascp:
 SRPBS_OPEN.tar.gz  50%  16.0MB  188.0Mb/s  1:20:24 ETA
 ```
 
-Use `--quiet` to suppress the progress bar, or `--format json` for structured JSON output (stdout) with progress messages on stderr.
+Use `--quiet` to suppress the progress bar and the transfer's own messages (a failure is still reported), or `--format json` for structured JSON output (stdout) with progress messages on stderr.
 
 ## License
 

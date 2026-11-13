@@ -115,7 +115,7 @@ aspera download <remote_path>... <local_dest> [options]
   --dry-run               Show transfer specs without executing
   --resume                Resume interrupted transfer
   -f, --format FORMAT     Output format: text, json (default: text)
-  -q, --quiet             Suppress ascp progress bar output
+  -q, --quiet             Suppress progress and transfer messages (not failures)
   -M, --multi-session N   Number of concurrent transfer sessions (default: 1)
   --gen4                  Use gen4 transfer spec
   --file-id FILE_ID       Gen4 file ID for transfer
@@ -137,4 +137,4 @@ During downloads, real-time progress is displayed by ascp:
 SRPBS_OPEN.tar.gz  50%  16.0MB  188.0Mb/s  1:20:24 ETA
 ```
 
-Use `--quiet` to suppress the progress bar, or `--format json` for structured JSON output (stdout) with progress messages on stderr.
+Use `--quiet` to suppress the progress bar and the transfer's own messages (a failure is still reported), or `--format json` for structured JSON output (stdout) with progress messages on stderr.

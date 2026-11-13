@@ -205,7 +205,7 @@ def main() -> None:
         "-q",
         "--quiet",
         action="store_true",
-        help="Suppress ascp progress bar output",
+        help="Suppress progress and transfer messages (not failures)",
     )
     download_parser.add_argument(
         "-M",

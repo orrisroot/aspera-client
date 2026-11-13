@@ -527,7 +527,7 @@ def download_with_progress(
         local_dest: Local destination directory.
         resume: Enable transfer resume policy.
         multi_session: Number of concurrent sessions (1=disabled).
-        quiet: Suppress ascp progress bar output.
+        quiet: Suppress ascp progress bar output and the transfer's own messages.
         ssh_private_key: PEM-encoded private key for dynamic key auth.
         max_retries: Maximum number of retry attempts on transient failure.
         transfer_timeout: Transfer timeout in seconds (None=no timeout).
@@ -542,6 +542,7 @@ def download_with_progress(
     Raises:
         FileNotFoundError: If ascp binary not found.
         RuntimeError: If transfer fails.
+        KeyboardInterrupt: If interrupted; ascp is stopped first.
     """
     ascp_path = get_ascp_path()
     if not os.path.exists(ascp_path):
@@ -563,7 +564,9 @@ def download_with_progress(
     fasp_port = spec.get("fasp_port", DEFAULT_FASP_PORT)
     token = spec.get("token", "")
     ssh_private_key = ssh_private_key or spec.get("ssh_private_key")
-    if not ssh_private_key:
+    # The bypass key authenticates only together with a token, so without a
+    # private key, a transfer lacking either has nothing to authenticate with.
+    if not ssh_private_key and not (bypass_key and token):
         print(
             "Warning: no SSH private key available for authentication. "
             "The server may require a password or the dynamic key setup may be incomplete.",
@@ -594,20 +597,21 @@ def download_with_progress(
         )
         effective_fallback_port = api_fallback_port if api_fallback_port else None
 
-        if effective_fallback and effective_fallback_port:
-            print(
-                f"  HTTP fallback enabled (port: {effective_fallback_port})",
-                file=sys.stderr,
-            )
-        elif effective_fallback:
-            print("  HTTP fallback enabled", file=sys.stderr)
-        else:
-            print(
-                "  HTTP fallback disabled (not supported by server or keys unavailable)",
-                file=sys.stderr,
-            )
-        if api_fallback_url:
-            print(f"  Fallback URL: {api_fallback_url}", file=sys.stderr)
+        if not quiet:
+            if effective_fallback and effective_fallback_port:
+                print(
+                    f"  HTTP fallback enabled (port: {effective_fallback_port})",
+                    file=sys.stderr,
+                )
+            elif effective_fallback:
+                print("  HTTP fallback enabled", file=sys.stderr)
+            else:
+                print(
+                    "  HTTP fallback disabled (not supported by server or keys unavailable)",
+                    file=sys.stderr,
+                )
+            if api_fallback_url:
+                print(f"  Fallback URL: {api_fallback_url}", file=sys.stderr)
 
         cmd, env = _build_ascp_command(
             token=token,
@@ -631,21 +635,22 @@ def download_with_progress(
             fallback_port=effective_fallback_port,
         )
 
-        # Log final ascp command with fallback flags (redacted token)
-        redacted_cmd = []
-        for i, part in enumerate(cmd):
-            if i > 0 and cmd[i - 1] == "-W":
-                redacted_cmd.append("***")
-            else:
-                redacted_cmd.append(part)
-        print(f"  Final ascp command: {' '.join(redacted_cmd)}", file=sys.stderr)
-        if effective_fallback:
-            has_fallback_cert = fallback_cert and os.path.exists(fallback_cert)
-            print(
-                f"  Fallback enabled (cert={'yes' if has_fallback_cert else 'no'}, "
-                f"port={effective_fallback_port or 443})",
-                file=sys.stderr,
-            )
+        if not quiet:
+            # Log final ascp command with fallback flags (redacted token)
+            redacted_cmd = []
+            for i, part in enumerate(cmd):
+                if i > 0 and cmd[i - 1] == "-W":
+                    redacted_cmd.append("***")
+                else:
+                    redacted_cmd.append(part)
+            print(f"  Final ascp command: {' '.join(redacted_cmd)}", file=sys.stderr)
+            if effective_fallback:
+                has_fallback_cert = fallback_cert and os.path.exists(fallback_cert)
+                print(
+                    f"  Fallback enabled (cert={'yes' if has_fallback_cert else 'no'}, "
+                    f"port={effective_fallback_port or 443})",
+                    file=sys.stderr,
+                )
     else:
         raise RuntimeError(
             "Could not build ascp command. "
@@ -655,15 +660,14 @@ def download_with_progress(
     # Ensure destination directory exists
     os.makedirs(local_dest, exist_ok=True)
 
-    print("Starting Aspera transfer...", file=sys.stderr)
-    if env:
-        print(
-            f"  Environment: {dict((k, '***' if k in ('ASPERA_SCP_TOKEN', 'ASPERA_SCP_SSH_PRIVATE_KEY') else v) for k, v in env.items())}",
-            file=sys.stderr,
-        )
-    print(file=sys.stderr)
-
-    start_time = time.time()
+    if not quiet:
+        print("Starting Aspera transfer...", file=sys.stderr)
+        if env:
+            print(
+                f"  Environment: {dict((k, '***' if k in ('ASPERA_SCP_TOKEN', 'ASPERA_SCP_SSH_PRIVATE_KEY') else v) for k, v in env.items())}",
+                file=sys.stderr,
+            )
+        print(file=sys.stderr)
 
     return_code = _execute_ascp(
         cmd=cmd,
@@ -674,18 +678,13 @@ def download_with_progress(
         transfer_timeout=transfer_timeout,
     )
 
-    if return_code == 0:
-        elapsed = time.time() - start_time
-        print(f"\nTransfer completed successfully! ({elapsed:.1f}s)")
-    else:
-        error_msg = get_ascp_error_message(return_code)
-        print(f"\nTransfer failed with exit code {return_code}: {error_msg}")
-        if effective_fallback:
-            print(
-                "  Fallback was enabled. If FASP failed, check HTTP fallback connectivity "
-                f"(port {effective_fallback_port or 443}).",
-                file=sys.stderr,
-            )
+    # _execute_ascp has reported the outcome; only the fallback hint is added here.
+    if return_code != 0 and effective_fallback and not quiet:
+        print(
+            "  Fallback was enabled. If FASP failed, check HTTP fallback connectivity "
+            f"(port {effective_fallback_port or 443}).",
+            file=sys.stderr,
+        )
 
     return return_code
 
@@ -705,13 +704,17 @@ def _execute_ascp(
         cmd: The ascp command list.
         env: Environment variables to merge.
         file_list_path: Path to temp file list for cleanup.
-        quiet: Suppress completion messages.
+        quiet: Suppress progress, retry and completion messages; failures are
+            still reported.
         redirect_stdout: If True, redirect stdout/stderr to a single stream.
         max_retries: Maximum number of retry attempts on transient failure.
         transfer_timeout: Transfer timeout in seconds (None=no timeout).
 
     Returns:
         Exit code from ascp (0 on success).
+
+    Raises:
+        KeyboardInterrupt: If interrupted; ascp is stopped first.
     """
     merged_env = os.environ.copy()
     merged_env.update(env)
@@ -721,82 +724,84 @@ def _execute_ascp(
         popen_kwargs["stdout"] = subprocess.STDOUT
         popen_kwargs["stderr"] = subprocess.STDOUT
 
+    start_time = time.time()
     last_exit_code: int = 1
-    for attempt in range(max_retries + 1):
-        process = subprocess.Popen(cmd, **popen_kwargs)
+    try:
+        for attempt in range(max_retries + 1):
+            process = subprocess.Popen(cmd, **popen_kwargs)
 
-        try:
-            if transfer_timeout:
-                process.wait(timeout=transfer_timeout)
-            else:
-                process.wait()
-        except subprocess.TimeoutExpired:
-            if not quiet:
-                print("\nTransfer timed out.", file=sys.stderr)
-            process.terminate()
             try:
-                process.wait(timeout=30)
+                if transfer_timeout:
+                    process.wait(timeout=transfer_timeout)
+                else:
+                    process.wait()
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-            last_exit_code = 1
+                if not quiet:
+                    print("\nTransfer timed out.", file=sys.stderr)
+                _stop_process(process)
+                last_exit_code = 1
+                if attempt < max_retries:
+                    _wait_before_retry(attempt, max_retries, "(timed out)", quiet)
+                    continue
+                break
+            except KeyboardInterrupt:
+                # Stop ascp and let the interrupt through: as an exit code it reads
+                # as a failed transfer, and the caller could not tell the user
+                # stopped it. Saying so is left to whoever handles the interrupt.
+                _stop_process(process)
+                raise
+
+            last_exit_code = process.returncode
+            if last_exit_code == 0 or last_exit_code not in RETRYABLE_EXIT_CODES:
+                break
             if attempt < max_retries:
-                delay = DEFAULT_RETRY_BACKOFF**attempt + DEFAULT_RETRY_JITTER * (
-                    attempt + 1
+                _wait_before_retry(
+                    attempt, max_retries, f"(exit code {last_exit_code})", quiet
                 )
-                print(
-                    f"  Retry {attempt + 1}/{max_retries} after timeout ({delay:.1f}s)",
-                    file=sys.stderr,
-                )
-                time.sleep(delay)
-                continue
-            return 1
-
-        except KeyboardInterrupt:
-            print("\nTransfer interrupted by user.", file=sys.stderr)
-            process.terminate()
-            try:
-                process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-            return 130
-
-        last_exit_code = process.returncode
-
+    finally:
+        # Only now: every retry runs the same command, which names this file.
         if file_list_path:
             try:
                 os.unlink(file_list_path)
             except OSError:
                 pass
 
-        # Check if exit code is retryable
-        if last_exit_code == 0:
-            if not quiet and not redirect_stdout:
-                print("\nTransfer completed successfully!")
-            return 0
-
-        if last_exit_code not in RETRYABLE_EXIT_CODES:
-            # Non-retryable error — fail immediately
-            if not quiet and not redirect_stdout:
-                error_msg = get_ascp_error_message(last_exit_code)
-                print(f"\nTransfer failed with exit code {last_exit_code}: {error_msg}")
-            return last_exit_code
-
-        if attempt < max_retries:
-            delay = DEFAULT_RETRY_BACKOFF**attempt + DEFAULT_RETRY_JITTER * (
-                attempt + 1
-            )
-            print(
-                f"  Retry {attempt + 1}/{max_retries} (exit code {last_exit_code}) "
-                f"after {delay:.1f}s",
-                file=sys.stderr,
-            )
-            time.sleep(delay)
-        else:
-            error_msg = get_ascp_error_message(last_exit_code)
-            if not quiet and not redirect_stdout:
-                print(f"\nTransfer failed with exit code {last_exit_code}: {error_msg}")
-            return last_exit_code
-
+    if last_exit_code == 0:
+        if not quiet and not redirect_stdout:
+            elapsed = time.time() - start_time
+            print(f"\nTransfer completed successfully! ({elapsed:.1f}s)")
+    else:
+        # A failure is reported even when quiet: the exit code alone does not say why.
+        error_msg = get_ascp_error_message(last_exit_code)
+        print(
+            f"\nTransfer failed with exit code {last_exit_code}: {error_msg}",
+            file=sys.stderr,
+        )
     return last_exit_code
+
+
+def _stop_process(process: subprocess.Popen) -> None:
+    """Terminate ascp, killing it if it does not exit in time or the wait is cut short."""
+    process.terminate()
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    except KeyboardInterrupt:
+        # A second Ctrl+C while waiting: do not leave ascp running behind it.
+        process.kill()
+        raise
+
+
+def _wait_before_retry(
+    attempt: int, max_retries: int, reason: str, quiet: bool
+) -> None:
+    """Back off before the next attempt, saying so unless quiet."""
+    delay = DEFAULT_RETRY_BACKOFF**attempt + DEFAULT_RETRY_JITTER * (attempt + 1)
+    if not quiet:
+        print(
+            f"  Retry {attempt + 1}/{max_retries} {reason} after {delay:.1f}s",
+            file=sys.stderr,
+        )
+    time.sleep(delay)
